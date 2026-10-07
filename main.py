@@ -12,7 +12,7 @@ pygame.init()
 SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 720
 FPS = 60
-NUM_CARS = 250
+NUM_CARS = 100
 
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("EvoWheels")
