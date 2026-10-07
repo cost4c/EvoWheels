@@ -1,130 +1,305 @@
-# Importar as bibliotecas necessárias
-import math
-import random
-import copy
+import numpy as np
 
 
-# Criar um neurônio artificial
-def neuronio(entradas, pesos, bias):
-    resultado = sum(
-        entrada * peso
-        for entrada, peso in zip(entradas, pesos)
-    )
-
-    resultado += bias
-
-    return math.tanh(resultado)
-
-
-# Criar uma camada de neurônios
-def camada(entradas, pesos, biases):
-    resultados = []
-
-    for peso, bias in zip(pesos, biases):
-        resultado = neuronio(entradas, peso, bias)
-        resultados.append(resultado)
-
-    return resultados
-
-
-# Criar o cérebro dos carrinhos
 class Brain:
+
     def __init__(self):
 
-        # Quantidade de neurônios em cada camada
-        self.camadas = [16, 32, 64, 32, 16, 16, 3]
+        # 7 sensores
+        # velocidade
+        # esterco
+        # tracao
+        #
+        # Total: 10 entradas
+        self.camadas = [
+            10,
+            24,
+            48,
+            24,
+            12,
+            3,
+        ]
 
         self.pesos = []
         self.biases = []
 
-        # Criar os pesos e biases iniciais
-        for i in range(len(self.camadas) - 1):
+        # -----------------------------------------------------
+        # CRIAR REDE
+        # -----------------------------------------------------
 
-            quantidade_entradas = self.camadas[i]
-            quantidade_neuronios = self.camadas[i + 1]
+        for entradas, saidas in zip(
+            self.camadas[:-1],
+            self.camadas[1:]
+        ):
 
-            pesos_camada = []
-            biases_camada = []
+            escala = (
+                1.0
+                / np.sqrt(entradas)
+            )
 
-            for _ in range(quantidade_neuronios):
+            pesos = np.random.uniform(
+                -1.0,
+                1.0,
+                (
+                    saidas,
+                    entradas
+                )
+            ).astype(
+                np.float32
+            )
 
-                pesos_neuronio = []
+            pesos *= escala
 
-                for _ in range(quantidade_entradas):
-                    peso = random.uniform(-1, 1)
-                    peso /= math.sqrt(quantidade_entradas)
+            biases = np.zeros(
+                saidas,
+                dtype=np.float32
+            )
 
-                    pesos_neuronio.append(peso)
+            self.pesos.append(
+                pesos
+            )
 
-                pesos_camada.append(pesos_neuronio)
-                biases_camada.append(0.0)
+            self.biases.append(
+                biases
+            )
 
-            self.pesos.append(pesos_camada)
-            self.biases.append(biases_camada)
+        # Instinto de corrida: nasce acelerando e com a direcao centrada
+        self.pesos[-1][0] *= 0.15
+        self.pesos[-1][1] *= 0.15
+        self.pesos[-1][2] *= 0.08
 
+        self.biases[-1][0] = 1.15
+        self.biases[-1][1] = -1.00
+        self.biases[-1][2] = 0.00
 
-    # Processar as informações recebidas pelos sensores
-    def pensar(self, entradas):
+        # -----------------------------------------------------
+        # TELEMETRIA
+        # -----------------------------------------------------
 
-        if len(entradas) != self.camadas[0]:
-            raise ValueError("Quantidade de entradas incorreta")
+        self.ultima_entrada = np.zeros(
+            self.camadas[0],
+            dtype=np.float32
+        )
 
-        resultado = entradas
+        self.ultimas_ativacoes = []
 
-        for pesos, biases in zip(self.pesos, self.biases):
-            resultado = camada(resultado, pesos, biases)
+        self.ultima_saida_bruta = np.zeros(
+            3,
+            dtype=np.float32
+        )
 
-        # Resultado das decisões do carrinho
-        return {
-            "acelerar": max(0.0, resultado[0]),
-            "frear": max(0.0, resultado[1]),
-            "virar": resultado[2]
+        self.ultima_decisao = {
+            "acelerar": 0.0,
+            "frear": 0.0,
+            "virar": 0.0,
         }
 
+        self.contador_decisoes = 0
 
-    # Criar uma cópia do cérebro
+    # ---------------------------------------------------------
+    # PENSAR
+    # ---------------------------------------------------------
+
+    def pensar(
+        self,
+        entradas
+    ):
+
+        if len(entradas) != self.camadas[0]:
+
+            raise ValueError(
+                f"O cerebro precisa receber "
+                f"{self.camadas[0]} entradas, "
+                f"mas recebeu {len(entradas)}."
+            )
+
+        resultado = np.asarray(
+            entradas,
+            dtype=np.float32
+        )
+
+        # Uma copia só para desacoplar da lista que chegou.
+        resultado = (
+            resultado.copy()
+        )
+
+        self.ultima_entrada = (
+            resultado
+        )
+
+        self.ultimas_ativacoes = [
+            resultado
+        ]
+
+        # Toda a rede e calculada pelo NumPy.
+        #
+        # Cada np.tanh ja devolve um array novo e nada o altera
+        # depois, entao guardar a telemetria nao precisa copiar
+        # de novo.
+        for pesos, biases in zip(
+            self.pesos,
+            self.biases
+        ):
+
+            resultado = np.tanh(
+                pesos @ resultado
+                + biases
+            )
+
+            self.ultimas_ativacoes.append(
+                resultado
+            )
+
+        self.ultima_saida_bruta = (
+            resultado
+        )
+
+        acelerar = max(
+            0.0,
+            float(
+                resultado[0]
+            )
+        )
+
+        frear = max(
+            0.0,
+            float(
+                resultado[1]
+            )
+        )
+
+        virar = float(
+            resultado[2]
+        )
+
+        self.ultima_decisao = {
+            "acelerar": acelerar,
+            "frear": frear,
+            "virar": virar,
+        }
+
+        self.contador_decisoes += 1
+
+        return self.ultima_decisao
+
+    # ---------------------------------------------------------
+    # COPIAR
+    # ---------------------------------------------------------
+
     def copiar(self):
-        return copy.deepcopy(self)
 
+        novo = Brain.__new__(
+            Brain
+        )
 
-    # Aplicar mutações nos neurônios
-    def mutar(self, taxa=0.05, intensidade=0.15):
+        novo.camadas = (
+            self.camadas.copy()
+        )
 
-        for i in range(len(self.pesos)):
+        novo.pesos = [
+            pesos.copy()
+            for pesos in self.pesos
+        ]
 
-            for j in range(len(self.pesos[i])):
+        novo.biases = [
+            biases.copy()
+            for biases in self.biases
+        ]
 
-                for k in range(len(self.pesos[i][j])):
+        novo.ultima_entrada = np.zeros(
+            novo.camadas[0],
+            dtype=np.float32
+        )
 
-                    if random.random() < taxa:
-                        self.pesos[i][j][k] += random.gauss(
-                            0, intensidade
-                        )
+        novo.ultimas_ativacoes = []
 
-                # Mutação dos biases
-                if random.random() < taxa:
-                    self.biases[i][j] += random.gauss(
-                        0, intensidade
-                    )
+        novo.ultima_saida_bruta = np.zeros(
+            3,
+            dtype=np.float32
+        )
 
+        novo.ultima_decisao = {
+            "acelerar": 0.0,
+            "frear": 0.0,
+            "virar": 0.0,
+        }
 
-# Testar o cérebro sem precisar iniciar o jogo
-if __name__ == "__main__":
+        novo.contador_decisoes = 0
 
-    cerebro = Brain()
+        return novo
 
-    # Simular informações dos 16 sensores
-    sensores = [0.5] * 16
+    # ---------------------------------------------------------
+    # MUTAR
+    # ---------------------------------------------------------
 
-    # Processar informações
-    decisao = cerebro.pensar(sensores)
+    def mutar(
+        self,
+        taxa=0.05,
+        intensidade=0.15
+    ):
 
-    print("Decisão do carrinho:")
-    print(decisao)
+        for indice in range(
+            len(self.pesos)
+        ):
 
-    # Criar um descendente com mutações
-    filho = cerebro.copiar()
-    filho.mutar()
+            # -------------------------------------------------
+            # PESOS
+            # -------------------------------------------------
 
-    print("Decisão do descendente:")
-    print(filho.pensar(sensores))
+            pesos = self.pesos[
+                indice
+            ]
+
+            mascara = (
+                np.random.random(
+                    pesos.shape
+                )
+                < taxa
+            )
+
+            quantidade = int(
+                mascara.sum()
+            )
+
+            if quantidade > 0:
+
+                pesos[
+                    mascara
+                ] += np.random.normal(
+                    0.0,
+                    intensidade,
+                    quantidade
+                ).astype(
+                    np.float32
+                )
+
+            # -------------------------------------------------
+            # BIASES
+            # -------------------------------------------------
+
+            biases = self.biases[
+                indice
+            ]
+
+            mascara_bias = (
+                np.random.random(
+                    biases.shape
+                )
+                < taxa
+            )
+
+            quantidade_bias = int(
+                mascara_bias.sum()
+            )
+
+            if quantidade_bias > 0:
+
+                biases[
+                    mascara_bias
+                ] += np.random.normal(
+                    0.0,
+                    intensidade,
+                    quantidade_bias
+                ).astype(
+                    np.float32
+                )

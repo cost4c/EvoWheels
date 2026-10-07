@@ -1,119 +1,245 @@
-# Importar as bibliotecas
 import math
 from pathlib import Path
 
 import pygame
 
-# Importar o cerebro do carrinho
 from brain import Brain
 
 
-# Classe do carrinho
 class Car:
 
-    # Angulos dos sensores em relacao a frente do carro
+    # ---------------------------------------------------------
+    # SENSORES SOMENTE NA FRENTE
+    # ---------------------------------------------------------
+
     SENSOR_ANGLES = (
-        -160, -125, -95, -70, -45, -22,
+        -70,
+        -45,
+        -22,
         0,
-        22, 45, 70, 95, 125, 160
+        22,
+        45,
+        70,
     )
 
-    # Converter os angulos para radianos apenas uma vez
     SENSOR_ANGLES_RAD = tuple(
         math.radians(angle)
         for angle in SENSOR_ANGLES
     )
 
-    # Sensores
-    SENSOR_RANGE = 170
-    SENSOR_STEP = 4
+    SENSOR_DIRECTIONS = tuple(
+        (
+            math.cos(angle),
+            math.sin(angle),
+        )
+        for angle in SENSOR_ANGLES_RAD
+    )
 
-    # Movimento
+    # Alcance pedido
+    SENSOR_RANGE = 100
+
+    # Comecar um pouco fora do centro
+    SENSOR_START = 10
+
+    # Testar de 5 em 5 pixels
+    SENSOR_STEP = 5
+
+    SENSOR_DISTANCES = tuple(
+        range(
+            SENSOR_START,
+            SENSOR_RANGE + 1,
+            SENSOR_STEP
+        )
+    )
+
+    # ---------------------------------------------------------
+    # VELOCIDADE
+    # ---------------------------------------------------------
+
+    # Nao existe velocidade minima fixa.
     MAX_SPEED = 175.0
-    START_SPEED = 85.0
 
-    ACCELERATION = 240.0
-    BRAKING = 310.0
-    FRICTION = 8.0
-    TURN_SPEED = 2.7
+    # Velocidade de largada, nao e um limite minimo
+    START_SPEED = 90.0
 
-    # O cerebro pensa 10 vezes por segundo
+    # Motor forte e freio rapido para atacar reta e curva
+    ACCELERATION = 340.0
+    BRAKING = 390.0
+
+    FRICTION = 1.5
+
+    TURN_SPEED = 2.75
+
+    # ---------------------------------------------------------
+    # SISTEMA ANTI ARRASTO
+    # ---------------------------------------------------------
+
+    # Abaixo disso o motor ajuda o carro
+    # a recuperar movimento.
+    ANTI_CRAWL_SPEED = 22.0
+
+    # Forca extra progressiva.
+    ANTI_CRAWL_ACCELERATION = 130.0
+
+    # Se insistir em se arrastar, a tentativa termina
+    CRAWL_SPEED = 10.0
+
+    CRAWL_TIME_LIMIT = 0.90
+
+    # Se praticamente parar
+    STOPPED_SPEED = 2.5
+
+    STOPPED_TIME_LIMIT = 0.35
+
+    # ---------------------------------------------------------
+    # IA
+    # ---------------------------------------------------------
+
+    # Dez decisoes por segundo
     THINK_INTERVAL = 0.10
 
-    # Aumentar a resposta inicial da rede
-    COMMAND_GAIN = 8.0
+    COMMAND_GAIN = 1.5
 
-    # Tempo maximo parado
-    STOPPED_LIMIT = 2.0
+    # Instinto de corrida. Nao fixa velocidade.
+    # Mantem tracao forte enquanto os sensores mostram pista livre.
+    CLEAR_THROTTLE = 0.78
+    CAUTION_THROTTLE = 0.52
+    APPROACH_THROTTLE = 0.28
 
-    # Pontuacao
+    CLEAR_RISK = 0.35
+    CAUTION_RISK = 0.55
+    DANGER_RISK = 0.72
+
+    # Em pista livre, reduz esterco aleatorio para evitar circulos.
+    # Quando aparece parede, devolve autoridade ao cerebro.
+    CLEAR_STEERING_AUTHORITY = 0.18
+
+    # ---------------------------------------------------------
+    # ANTI LOOP
+    # ---------------------------------------------------------
+
+    NO_PROGRESS_LIMIT = 1.8
+
+    MIN_PROGRESS_DELTA = 0.25
+
+    # ---------------------------------------------------------
+    # FITNESS
+    # ---------------------------------------------------------
+
     CHECKPOINT_REWARD = 100
     LAP_REWARD = 1000
 
-    # Tamanho do carro dentro do jogo
+    # Bonus por avancar rapido sem premiar velocidade inutil
+    SPEED_PROGRESS_REWARD = 35.0
+    CHECKPOINT_SPEED_REWARD = 15.0
+
+    # ---------------------------------------------------------
+    # TAMANHO DO CARRO
+    # ---------------------------------------------------------
+
     CAR_LENGTH = 28
 
-    # Imagem principal compartilhada por todos os carros
+    HITBOX_HALF_LENGTH = 11.5
+    HITBOX_HALF_WIDTH = 5.0
+
+    # ---------------------------------------------------------
+    # CACHE DA IMAGEM
+    # ---------------------------------------------------------
+
     base_image = None
 
-    # Cache das 360 rotacoes
     rotation_cache = {}
-    mask_cache = {}
+
     cache_ready = False
 
-    def __init__(self, track, identifier):
+    # ---------------------------------------------------------
+    # INICIALIZAR
+    # ---------------------------------------------------------
 
-        self.identifier = identifier
+    def __init__(
+        self,
+        track,
+        identifier,
+        evolution
+    ):
 
-        # Cada carro possui seu proprio cerebro
-        # O cerebro nao e apagado quando o carro bate
-        self.brain = Brain()
-
-        # Pontuacao
-        self.fitness = 0
-        self.best_fitness = 0
-
-        # Progresso na pista
-        self.checkpoint_atual = 0
-        self.voltas = 0
-
-        # Quantidade de mortes
-        self.deaths = 0
-
-        # Carregar a imagem do carro apenas uma vez
-        if Car.base_image is None:
-            Car.base_image = self.load_car_sprite()
-
-        self.original_image = Car.base_image
-
-        # Tamanho real depois do redimensionamento
-        self.width, self.height = (
-            self.original_image.get_size()
+        self.identifier = (
+            identifier
         )
 
-        # Criar as 360 rotacoes apenas uma vez
+        self.evolution = (
+            evolution
+        )
+
+        # Cada carro possui seu proprio cerebro
+        self.brain = Brain()
+
+        # Fitness
+        self.fitness = 0.0
+        self.best_fitness = 0.0
+
+        # Corrida
+        self.checkpoint_atual = 0
+        self.voltas = 0
+        self.deaths = 0
+
+        # Progresso
+        self.distancia_inicio_segmento = 1.0
+        self.menor_distancia_segmento = 1.0
+
+        # Velocidade so vale quando existe progresso real
+        self.speed_fitness = 0.0
+
+        self.tempo_sem_progresso = 0.0
+        self.melhor_score_tentativa = 0.0
+
+        # Anti arrasto
+        self.tempo_arrastando = 0.0
+        self.tempo_parado = 0.0
+
+        # 7 sensores
+        self.last_sensor_risks = [
+            0.0
+        ] * len(
+            self.SENSOR_ANGLES
+        )
+
+        # -----------------------------------------------------
+        # IMAGEM
+        # -----------------------------------------------------
+
+        if Car.base_image is None:
+
+            Car.base_image = (
+                self.load_car_sprite()
+            )
+
+        self.original_image = (
+            Car.base_image
+        )
+
         if not Car.cache_ready:
+
             self.create_rotation_cache()
 
-        self.image = self.original_image
-
-        self.car_mask = pygame.mask.from_surface(
-            self.original_image,
-            180
+        self.image = (
+            self.original_image
         )
 
         self.sprite_angle = None
 
-        # Colocar o carro na pista
-        self.reset(track)
+        self.reset(
+            track
+        )
 
     # ---------------------------------------------------------
-    # CARREGAR IMAGEM DO CARRO
+    # CARREGAR IMAGEM
     # ---------------------------------------------------------
 
-    def load_car_sprite(self):
+    def load_car_sprite(
+        self
+    ):
 
-        # Caminho do arquivo
         car_path = (
             Path(__file__).resolve().parent
             / "assets"
@@ -121,36 +247,43 @@ class Car:
             / "car1.png"
         )
 
-        # Verificar se a imagem existe
         if not car_path.exists():
+
             raise FileNotFoundError(
-                f"Imagem do carro nao encontrada: {car_path}"
+                f"Imagem do carro nao encontrada: "
+                f"{car_path}"
             )
 
-        # Carregar mantendo transparencia
         image = pygame.image.load(
             str(car_path)
         ).convert_alpha()
 
-        # Remover espaco transparente desnecessario
-        bounds = image.get_bounding_rect(
-            min_alpha=80
+        bounds = (
+            image.get_bounding_rect(
+                min_alpha=80
+            )
         )
 
-        if bounds.width > 0 and bounds.height > 0:
-            image = image.subsurface(
-                bounds
-            ).copy()
+        if (
+            bounds.width > 0
+            and bounds.height > 0
+        ):
 
-        # A imagem esta com a frente apontando para cima.
-        # No jogo, angulo 0 aponta para a direita.
+            image = (
+                image.subsurface(
+                    bounds
+                ).copy()
+            )
+
+        # Frente para direita
         image = pygame.transform.rotate(
             image,
             -90
         )
 
-        # Manter proporcao ao diminuir o carro
-        width, height = image.get_size()
+        width, height = (
+            image.get_size()
+        )
 
         scale = (
             self.CAR_LENGTH
@@ -159,202 +292,293 @@ class Car:
 
         new_size = (
             self.CAR_LENGTH,
+
             max(
                 1,
-                round(height * scale)
+                round(
+                    height
+                    * scale
+                )
             )
         )
 
-        # Redimensionar com boa qualidade
-        image = pygame.transform.smoothscale(
+        return pygame.transform.smoothscale(
             image,
             new_size
         )
 
-        return image
-
     # ---------------------------------------------------------
-    # CRIAR CACHE DAS ROTACOES
+    # CACHE DE ROTACOES
     # ---------------------------------------------------------
 
-    def create_rotation_cache(self):
+    def create_rotation_cache(
+        self
+    ):
 
-        # Criar uma versao do carro para cada grau
-        for angle in range(360):
+        for angle in range(
+            360
+        ):
 
-            image = pygame.transform.rotate(
+            Car.rotation_cache[
+                angle
+            ] = pygame.transform.rotate(
                 self.original_image,
                 -angle
             )
 
-            # Criar mascara ignorando partes transparentes
-            mask = pygame.mask.from_surface(
-                image,
-                180
-            )
-
-            Car.rotation_cache[angle] = image
-            Car.mask_cache[angle] = mask
-
         Car.cache_ready = True
 
     # ---------------------------------------------------------
-    # REINICIAR O CARRO
+    # ATUALIZAR IMAGEM
     # ---------------------------------------------------------
 
-    def reset(self, track):
+    def update_image(
+        self
+    ):
 
-        # Guardar melhor pontuacao
-        self.best_fitness = max(
-            self.best_fitness,
-            self.fitness
+        angle_degrees = (
+            round(
+                math.degrees(
+                    self.angle
+                )
+            )
+            % 360
         )
 
-        # Nova tentativa começa com zero
-        self.fitness = 0
+        if (
+            self.sprite_angle
+            == angle_degrees
+        ):
+            return
 
-        # Voltar para a largada
-        self.x, self.y = map(
-            float,
-            track.spawn_point
+        self.image = (
+            Car.rotation_cache[
+                angle_degrees
+            ]
+        )
+
+        self.sprite_angle = (
+            angle_degrees
+        )
+
+    # ---------------------------------------------------------
+    # RESET
+    # ---------------------------------------------------------
+
+    def reset(
+        self,
+        track
+    ):
+
+        score_anterior = (
+            self.get_evolution_score()
+        )
+
+        self.best_fitness = max(
+            self.best_fitness,
+            score_anterior
+        )
+
+        self.fitness = 0.0
+        self.speed_fitness = 0.0
+
+        self.x = float(
+            track.spawn_point[0]
+        )
+
+        self.y = float(
+            track.spawn_point[1]
         )
 
         self.angle = float(
             track.spawn_angle
         )
 
-        # Velocidade inicial
-        self.speed = self.START_SPEED
+        # Isso e apenas a velocidade de largada.
+        # Nao e velocidade obrigatoria.
+        self.speed = (
+            self.START_SPEED
+        )
 
-        # Comandos
         self.steering = 0.0
+
         self.accelerator = 0.0
+
         self.brake = 0.0
 
         self.last_traction = 0.0
 
-        # Espalhar o processamento dos cerebros
-        # para os carros nao pensarem todos juntos
+        # Distribuir pensamento entre frames
         self.think_timer = (
             self.identifier % 10
         ) * (
-            self.THINK_INTERVAL / 10
+            self.THINK_INTERVAL / 10.0
         )
 
-        # Tempos
         self.time_alive = 0.0
-        self.time_stopped = 0.0
 
-        # Distancia da tentativa atual
         self.distance_traveled = 0.0
 
-        # Progresso
         self.checkpoint_atual = 0
+
         self.voltas = 0
 
-        # Atualizar imagem inicial
-        self.sprite_angle = None
-        self.update_image()
+        self.tempo_sem_progresso = 0.0
 
-    # ---------------------------------------------------------
-    # ATUALIZAR IMAGEM
-    # ---------------------------------------------------------
+        self.melhor_score_tentativa = 0.0
 
-    def update_image(self):
+        self.tempo_arrastando = 0.0
 
-        # Converter o angulo para graus de 0 a 359
-        angle_degrees = (
-            round(math.degrees(self.angle))
-            % 360
+        self.tempo_parado = 0.0
+
+        self.last_sensor_risks = [
+            0.0
+        ] * len(
+            self.SENSOR_ANGLES
         )
 
-        # Nao atualizar se o angulo nao mudou
-        if self.sprite_angle == angle_degrees:
-            return
+        self.reset_segment_progress(
+            track
+        )
 
-        # Usar imagem pronta do cache
-        self.image = Car.rotation_cache[
-            angle_degrees
-        ]
+        self.sprite_angle = None
 
-        # Usar mascara pronta do cache
-        self.car_mask = Car.mask_cache[
-            angle_degrees
-        ]
-
-        self.sprite_angle = angle_degrees
+        self.update_image()
 
     # ---------------------------------------------------------
     # SENSORES
     # ---------------------------------------------------------
 
-    def get_sensors(self, track):
+    def get_sensors(
+        self,
+        track
+    ):
 
         readings = []
 
-        # Criar os 13 sensores
-        for relative_angle in self.SENSOR_ANGLES_RAD:
+        risks = []
 
-            ray_angle = (
-                self.angle
-                + relative_angle
+        # Calcular apenas uma vez
+        cos_car = math.cos(
+            self.angle
+        )
+
+        sin_car = math.sin(
+            self.angle
+        )
+
+        for (
+            relative_cos,
+            relative_sin
+        ) in self.SENSOR_DIRECTIONS:
+
+            direction_x = (
+                cos_car
+                * relative_cos
+
+                - sin_car
+                * relative_sin
             )
 
-            direction_x = math.cos(
-                ray_angle
+            direction_y = (
+                sin_car
+                * relative_cos
+
+                + cos_car
+                * relative_sin
             )
 
-            direction_y = math.sin(
-                ray_angle
-            )
+            # 0 = seguro
+            risco = 0.0
 
-            # 1 significa que nao encontrou borda
-            reading = 1.0
-
-            for distance in range(
-                0,
-                self.SENSOR_RANGE + 1,
-                self.SENSOR_STEP
+            for distance in (
+                self.SENSOR_DISTANCES
             ):
 
-                point = (
+                x = (
                     self.x
-                    + direction_x * distance,
-
-                    self.y
-                    + direction_y * distance
+                    + direction_x
+                    * distance
                 )
 
-                # Encontrou a borda da pista
-                if not track.is_point_on_track(
-                    point
+                y = (
+                    self.y
+                    + direction_y
+                    * distance
+                )
+
+                if not track.is_point_on_track_xy(
+                    x,
+                    y
                 ):
 
-                    reading = (
+                    distancia_util = (
                         distance
-                        / self.SENSOR_RANGE
+                        - self.SENSOR_START
+                    )
+
+                    alcance_util = (
+                        self.SENSOR_RANGE
+                        - self.SENSOR_START
+                    )
+
+                    livre = (
+                        distancia_util
+                        / alcance_util
+                    )
+
+                    # Quanto mais perto,
+                    # maior o risco
+                    risco = (
+                        1.0 - livre
+                    )
+
+                    risco = max(
+                        0.0,
+                        min(
+                            1.0,
+                            risco
+                        )
                     )
 
                     break
 
             readings.append(
-                reading
+                risco
             )
 
-        # Entrada 14
-        # Velocidade atual
-        readings.append(
-            self.speed / self.MAX_SPEED
+            risks.append(
+                risco
+            )
+
+        self.last_sensor_risks = (
+            risks
         )
 
-        # Entrada 15
-        # Direcao usada anteriormente
+        # -----------------------------------------------------
+        # ENTRADA 8
+        # VELOCIDADE
+        # -----------------------------------------------------
+
+        readings.append(
+            self.speed
+            / self.MAX_SPEED
+        )
+
+        # -----------------------------------------------------
+        # ENTRADA 9
+        # DIRECAO ANTERIOR
+        # -----------------------------------------------------
+
         readings.append(
             self.steering
         )
 
-        # Entrada 16
-        # Aceleracao menos freio
+        # -----------------------------------------------------
+        # ENTRADA 10
+        # TRACAO ANTERIOR
+        # -----------------------------------------------------
+
         readings.append(
             self.last_traction
         )
@@ -362,152 +586,637 @@ class Car:
         return readings
 
     # ---------------------------------------------------------
-    # CHECKPOINTS
+    # DISTANCIA PARA CHECKPOINT
     # ---------------------------------------------------------
 
-    def update_checkpoint(self, track):
+    def distance_to_checkpoint(
+        self,
+        track
+    ):
 
-        # Se nao existem checkpoints
+        if not track.checkpoints:
+
+            return 0.0
+
+        checkpoint = (
+            track.checkpoints[
+                self.checkpoint_atual
+            ]
+        )
+
+        dx = (
+            self.x
+            - checkpoint[0]
+        )
+
+        dy = (
+            self.y
+            - checkpoint[1]
+        )
+
+        return math.sqrt(
+            dx * dx
+            + dy * dy
+        )
+
+    # ---------------------------------------------------------
+    # INICIAR PROGRESSO DO SEGMENTO
+    # ---------------------------------------------------------
+
+    def reset_segment_progress(
+        self,
+        track
+    ):
+
+        if not track.checkpoints:
+
+            self.distancia_inicio_segmento = 1.0
+
+            self.menor_distancia_segmento = 1.0
+
+            return
+
+        distancia = (
+            self.distance_to_checkpoint(
+                track
+            )
+        )
+
+        self.distancia_inicio_segmento = max(
+            1.0,
+            distancia
+        )
+
+        self.menor_distancia_segmento = (
+            self.distancia_inicio_segmento
+        )
+
+    # ---------------------------------------------------------
+    # ATUALIZAR PROGRESSO
+    # ---------------------------------------------------------
+
+    def update_segment_progress(
+        self,
+        track
+    ):
+
         if not track.checkpoints:
             return
 
-        # Verificar somente o checkpoint esperado
-        reached = track.checkpoint_reached(
-            (self.x, self.y),
-            self.checkpoint_atual
+        distancia = (
+            self.distance_to_checkpoint(
+                track
+            )
         )
 
-        if not reached:
+        if (
+            distancia
+            < self.menor_distancia_segmento
+        ):
+
+            inicio = max(
+                1.0,
+                self.distancia_inicio_segmento
+            )
+
+            progresso_anterior = (
+                inicio
+                - self.menor_distancia_segmento
+            ) / inicio
+
+            self.menor_distancia_segmento = (
+                distancia
+            )
+
+            progresso_atual = (
+                inicio
+                - self.menor_distancia_segmento
+            ) / inicio
+
+            progresso_anterior = max(
+                0.0,
+                min(0.999, progresso_anterior)
+            )
+
+            progresso_atual = max(
+                0.0,
+                min(0.999, progresso_atual)
+            )
+
+            delta_progresso = max(
+                0.0,
+                progresso_atual
+                - progresso_anterior
+            )
+
+            # Premiar velocidade apenas quando esta indo para frente na pista
+            if delta_progresso > 0.0:
+
+                velocidade = max(
+                    0.0,
+                    min(
+                        1.0,
+                        self.speed / self.MAX_SPEED
+                    )
+                )
+
+                self.speed_fitness += (
+                    delta_progresso
+                    * self.SPEED_PROGRESS_REWARD
+                    * (velocidade ** 1.5)
+                )
+
+        score = (
+            self.get_evolution_score()
+        )
+
+        if (
+            score
+            > self.best_fitness
+        ):
+
+            self.best_fitness = (
+                score
+            )
+
+    # ---------------------------------------------------------
+    # SCORE
+    # ---------------------------------------------------------
+
+    def get_evolution_score(
+        self
+    ):
+
+        inicio = max(
+            1.0,
+            self.distancia_inicio_segmento
+        )
+
+        progresso = (
+            inicio
+            - self.menor_distancia_segmento
+        ) / inicio
+
+        progresso = max(
+            0.0,
+            min(
+                0.999,
+                progresso
+            )
+        )
+
+        parcial = (
+            progresso
+            * self.CHECKPOINT_REWARD
+        )
+
+        return (
+            float(
+                self.fitness
+            )
+            + self.speed_fitness
+            + parcial
+        )
+
+    # ---------------------------------------------------------
+    # CHECKPOINT
+    # ---------------------------------------------------------
+
+    def update_checkpoint(
+        self,
+        track
+    ):
+
+        if not track.checkpoints:
             return
 
-        # Ganhar pontos
+        if not track.checkpoint_reached(
+            (
+                self.x,
+                self.y
+            ),
+            self.checkpoint_atual
+        ):
+
+            return
+
         self.fitness += (
             self.CHECKPOINT_REWARD
         )
 
-        # Atualizar melhor pontuacao
+        # Cruzar o checkpoint rapido vale mais do que apenas correr sem rumo
+        velocidade = max(
+            0.0,
+            min(
+                1.0,
+                self.speed / self.MAX_SPEED
+            )
+        )
+
+        self.speed_fitness += (
+            self.CHECKPOINT_SPEED_REWARD
+            * (velocidade ** 1.5)
+        )
+
+        self.checkpoint_atual += 1
+
+        if (
+            self.checkpoint_atual
+            >= len(
+                track.checkpoints
+            )
+        ):
+
+            self.voltas += 1
+
+            self.fitness += (
+                self.LAP_REWARD
+            )
+
+            self.checkpoint_atual = 0
+
         self.best_fitness = max(
             self.best_fitness,
             self.fitness
         )
 
-        # Ir para o proximo checkpoint
-        self.checkpoint_atual += 1
+        self.reset_segment_progress(
+            track
+        )
 
-        # Verificar se completou todos
-        if self.checkpoint_atual >= len(
-            track.checkpoints
-        ):
+    # ---------------------------------------------------------
+    # COLISAO
+    # ---------------------------------------------------------
 
-            # Completou uma volta
-            self.voltas += 1
+    def is_on_track(
+        self,
+        track
+    ):
 
-            # Bonus da volta
-            self.fitness += (
-                self.LAP_REWARD
-            )
+        cos_a = math.cos(
+            self.angle
+        )
 
-            self.best_fitness = max(
-                self.best_fitness,
-                self.fitness
-            )
+        sin_a = math.sin(
+            self.angle
+        )
 
-            # Nova volta
-            self.checkpoint_atual = 0
+        side_x = (
+            -sin_a
+        )
+
+        side_y = (
+            cos_a
+        )
+
+        front_x = (
+            self.x
+            + cos_a
+            * self.HITBOX_HALF_LENGTH
+        )
+
+        front_y = (
+            self.y
+            + sin_a
+            * self.HITBOX_HALF_LENGTH
+        )
+
+        rear_x = (
+            self.x
+            - cos_a
+            * self.HITBOX_HALF_LENGTH
+        )
+
+        rear_y = (
+            self.y
+            - sin_a
+            * self.HITBOX_HALF_LENGTH
+        )
+
+        width = (
+            self.HITBOX_HALF_WIDTH
+        )
+
+        points = (
+            # Centro
+            (
+                self.x,
+                self.y
+            ),
+
+            # Frente
+            (
+                front_x,
+                front_y
+            ),
+
+            # Traseira
+            (
+                rear_x,
+                rear_y
+            ),
+
+            # Frente esquerda
+            (
+                front_x
+                + side_x * width,
+
+                front_y
+                + side_y * width
+            ),
+
+            # Frente direita
+            (
+                front_x
+                - side_x * width,
+
+                front_y
+                - side_y * width
+            ),
+
+            # Traseira esquerda
+            (
+                rear_x
+                + side_x * width,
+
+                rear_y
+                + side_y * width
+            ),
+
+            # Traseira direita
+            (
+                rear_x
+                - side_x * width,
+
+                rear_y
+                - side_y * width
+            ),
+        )
+
+        for x, y in points:
+
+            if not track.is_point_on_track_xy(
+                x,
+                y
+            ):
+
+                return False
+
+        return True
 
     # ---------------------------------------------------------
     # MORTE
     # ---------------------------------------------------------
 
-    def die(self, track):
+    def die(
+        self,
+        track
+    ):
 
-        # Contar morte
-        self.deaths += 1
-
-        # Somente este carro reinicia
-        # O cerebro continua igual
-        self.reset(track)
-
-    # ---------------------------------------------------------
-    # ATUALIZAR O CARRO
-    # ---------------------------------------------------------
-
-    def update(self, dt, track):
-
-        # Evitar saltos grandes se houver travamento
-        dt = max(
-            0.0,
-            min(dt, 0.05)
+        score = (
+            self.get_evolution_score()
         )
 
-        if dt == 0:
+        self.best_fitness = max(
+            self.best_fitness,
+            score
+        )
+
+        self.deaths += 1
+
+        # Receber novo cerebro com conhecimento
+        # da elite da populacao
+        self.brain = (
+            self.evolution.criar_descendente(
+                self.brain,
+                score,
+                getattr(
+                    track,
+                    "name",
+                    None
+                )
+            )
+        )
+
+        self.reset(
+            track
+        )
+
+    # ---------------------------------------------------------
+    # DECISAO DA IA
+    # ---------------------------------------------------------
+
+    def think(
+        self,
+        track
+    ):
+
+        entradas = (
+            self.get_sensors(
+                track
+            )
+        )
+
+        decisao = (
+            self.brain.pensar(
+                entradas
+            )
+        )
+
+        acelerar = max(
+            0.0,
+            min(
+                1.0,
+                decisao[
+                    "acelerar"
+                ]
+                * self.COMMAND_GAIN
+            )
+        )
+
+        frear = max(
+            0.0,
+            min(
+                1.0,
+                decisao[
+                    "frear"
+                ]
+                * self.COMMAND_GAIN
+            )
+        )
+
+        # Aceleracao base de corrida.
+        # O cerebro continua livre para frear quando o risco aumenta.
+        riscos = self.last_sensor_risks
+
+        risco_frente = max(
+            riscos[2],
+            riscos[3],
+            riscos[4],
+        )
+
+        if risco_frente < self.CLEAR_RISK:
+            tracao_base = self.CLEAR_THROTTLE
+        elif risco_frente < self.CAUTION_RISK:
+            tracao_base = self.CAUTION_THROTTLE
+        elif risco_frente < self.DANGER_RISK:
+            tracao_base = self.APPROACH_THROTTLE
+        else:
+            tracao_base = 0.0
+
+        tracao_neural = (
+            acelerar
+            - frear
+        )
+
+        # Em pista livre, todos correm.
+        # Perto da parede, a rede neural assume o controle total.
+        if risco_frente < self.DANGER_RISK:
+            tracao_desejada = max(
+                tracao_neural,
+                tracao_base
+            )
+        else:
+            tracao_desejada = tracao_neural
+
+        tracao = (
+            self.last_traction
+            * 0.22
+
+            + tracao_desejada
+            * 0.78
+        )
+
+        if abs(
+            tracao
+        ) < 0.02:
+
+            tracao = 0.0
+
+        self.last_traction = (
+            tracao
+        )
+
+        if tracao >= 0.0:
+
+            self.accelerator = (
+                tracao
+            )
+
+            self.brake = 0.0
+
+        else:
+
+            self.accelerator = 0.0
+
+            self.brake = (
+                -tracao
+            )
+
+        # -----------------------------------------------------
+        # DIRECAO
+        # -----------------------------------------------------
+
+        direcao_desejada = max(
+            -1.0,
+            min(
+                1.0,
+                decisao[
+                    "virar"
+                ]
+                * self.COMMAND_GAIN
+            )
+        )
+
+        # Sem parede por perto, o carro tende a atacar em linha reta.
+        # O sensor nao escolhe o lado da curva; apenas libera mais esterco.
+        risco_lateral = max(
+            riscos[0],
+            riscos[1],
+            riscos[5],
+            riscos[6],
+        )
+
+        risco_direcao = max(
+            risco_frente,
+            risco_lateral
+        )
+
+        autoridade = (
+            self.CLEAR_STEERING_AUTHORITY
+            + (1.0 - self.CLEAR_STEERING_AUTHORITY)
+            * min(1.0, risco_direcao / self.DANGER_RISK)
+        )
+
+        direcao_desejada *= autoridade
+
+        if abs(
+            direcao_desejada
+        ) < 0.025:
+
+            direcao_desejada = 0.0
+
+        self.steering = (
+            self.steering
+            * 0.18
+
+            + direcao_desejada
+            * 0.82
+        )
+
+    # ---------------------------------------------------------
+    # UPDATE
+    # ---------------------------------------------------------
+
+    def update(
+        self,
+        dt,
+        track
+    ):
+
+        dt = max(
+            0.0,
+            min(
+                dt,
+                0.05
+            )
+        )
+
+        if dt <= 0.0:
             return
 
-        # Tempo vivo
         self.time_alive += dt
-
-        # Tempo ate a proxima decisao
-        self.think_timer -= dt
 
         # -----------------------------------------------------
         # CEREBRO
         # -----------------------------------------------------
 
-        if self.think_timer <= 0.0:
+        self.think_timer -= dt
 
-            # Ler os sensores
-            entradas = self.get_sensors(
+        if (
+            self.think_timer
+            <= 0.0
+        ):
+
+            self.think(
                 track
             )
 
-            # Tomar uma decisao
-            decisao = self.brain.pensar(
-                entradas
-            )
-
-            # Acelerar
-            self.accelerator = max(
-                0.0,
-                min(
-                    1.0,
-                    decisao["acelerar"]
-                    * self.COMMAND_GAIN
-                )
-            )
-
-            # Frear
-            self.brake = max(
-                0.0,
-                min(
-                    1.0,
-                    decisao["frear"]
-                    * self.COMMAND_GAIN
-                )
-            )
-
-            # Virar
-            self.steering = max(
-                -1.0,
-                min(
-                    1.0,
-                    decisao["virar"]
-                    * self.COMMAND_GAIN
-                )
-            )
-
-            # Guardar tracao
-            self.last_traction = (
-                self.accelerator
-                - self.brake
-            )
-
-            # Proxima decisao
             self.think_timer += (
                 self.THINK_INTERVAL
             )
 
+            if (
+                self.think_timer
+                <= 0.0
+            ):
+
+                self.think_timer = (
+                    self.THINK_INTERVAL
+                )
+
         # -----------------------------------------------------
-        # FISICA
+        # FISICA NORMAL
         # -----------------------------------------------------
 
         acceleration = (
@@ -520,36 +1229,145 @@ class Car:
             - self.FRICTION
         )
 
-        # Atualizar velocidade
-        self.speed = max(
-            0.0,
-            min(
-                self.MAX_SPEED,
-                self.speed
-                + acceleration * dt
+        # -----------------------------------------------------
+        # ANTI ARRASTO
+        # -----------------------------------------------------
+
+        # Isso NAO fixa a velocidade.
+        #
+        # Apenas da uma ajuda progressiva
+        # caso o carro esteja ficando lento demais.
+        if (
+            self.speed
+            < self.ANTI_CRAWL_SPEED
+        ):
+
+            falta_velocidade = (
+                self.ANTI_CRAWL_SPEED
+                - self.speed
             )
+
+            proporcao = (
+                falta_velocidade
+                / self.ANTI_CRAWL_SPEED
+            )
+
+            ajuda = (
+                proporcao
+                * self.ANTI_CRAWL_ACCELERATION
+            )
+
+            acceleration += (
+                ajuda
+            )
+
+        # -----------------------------------------------------
+        # APLICAR VELOCIDADE
+        # -----------------------------------------------------
+
+        self.speed += (
+            acceleration
+            * dt
         )
 
-        # Virar
-        if self.speed > 0.0:
+        # Nunca pode andar para tras
+        if self.speed < 0.0:
 
-            speed_factor = (
-                0.35
-                + 0.65
-                * (
-                    self.speed
-                    / self.MAX_SPEED
-                )
+            self.speed = 0.0
+
+        if (
+            self.speed
+            > self.MAX_SPEED
+        ):
+
+            self.speed = (
+                self.MAX_SPEED
             )
 
-            self.angle += (
-                self.steering
-                * self.TURN_SPEED
-                * speed_factor
-                * dt
+        # -----------------------------------------------------
+        # DETECTAR ARRASTO
+        # -----------------------------------------------------
+
+        if (
+            self.speed
+            < self.CRAWL_SPEED
+        ):
+
+            self.tempo_arrastando += (
+                dt
             )
 
-        # Atualizar imagem
+        else:
+
+            self.tempo_arrastando = 0.0
+
+        # Insistiu em andar muito devagar
+        if (
+            self.tempo_arrastando
+            >= self.CRAWL_TIME_LIMIT
+        ):
+
+            self.die(
+                track
+            )
+
+            return
+
+        # -----------------------------------------------------
+        # DETECTAR PARADO
+        # -----------------------------------------------------
+
+        if (
+            self.speed
+            < self.STOPPED_SPEED
+        ):
+
+            self.tempo_parado += (
+                dt
+            )
+
+        else:
+
+            self.tempo_parado = 0.0
+
+        if (
+            self.tempo_parado
+            >= self.STOPPED_TIME_LIMIT
+        ):
+
+            self.die(
+                track
+            )
+
+            return
+
+        # -----------------------------------------------------
+        # DIRECAO
+        # -----------------------------------------------------
+
+        speed_ratio = (
+            self.speed
+            / self.MAX_SPEED
+        )
+
+        steering_control = (
+            1.0
+            - 0.48
+            * speed_ratio
+        )
+
+        steering_control = max(
+            0.52,
+            steering_control
+        )
+
+        self.angle += (
+            self.steering
+            * self.TURN_SPEED
+            * steering_control
+            * dt
+        )
+
         self.update_image()
 
         # -----------------------------------------------------
@@ -561,93 +1379,124 @@ class Car:
             * dt
         )
 
-        # Dividir em pequenos passos
-        # para nao atravessar a borda
         steps = max(
             1,
             math.ceil(
-                distance / 2.0
+                distance / 4.0
             )
         )
 
+        step_distance = (
+            distance / steps
+        )
+
+        cos_a = math.cos(
+            self.angle
+        )
+
+        sin_a = math.sin(
+            self.angle
+        )
+
         dx = (
-            math.cos(self.angle)
-            * distance
-            / steps
+            cos_a
+            * step_distance
         )
 
         dy = (
-            math.sin(self.angle)
-            * distance
-            / steps
+            sin_a
+            * step_distance
         )
 
-        # Mover passo a passo
-        for _ in range(steps):
+        for _ in range(
+            steps
+        ):
 
             self.x += dx
             self.y += dy
 
-            rect = self.image.get_rect(
-                center=(
-                    round(self.x),
-                    round(self.y)
-                )
-            )
-
-            # Saiu da pista
-            if not track.is_car_on_track(
-                self.car_mask,
-                rect
+            if not self.is_on_track(
+                track
             ):
 
-                self.die(track)
+                self.die(
+                    track
+                )
+
                 return
 
-        # Somar distancia percorrida
         self.distance_traveled += (
             distance
         )
 
         # -----------------------------------------------------
-        # CHECKPOINT
+        # PROGRESSO
         # -----------------------------------------------------
+
+        self.update_segment_progress(
+            track
+        )
 
         self.update_checkpoint(
             track
         )
 
+        score_atual = (
+            self.get_evolution_score()
+        )
+
         # -----------------------------------------------------
-        # CARRO PARADO
+        # ANTI LOOP
         # -----------------------------------------------------
 
-        if self.speed < 3.0:
+        if (
+            score_atual
+            >= self.melhor_score_tentativa
+            + self.MIN_PROGRESS_DELTA
+        ):
 
-            self.time_stopped += dt
+            self.melhor_score_tentativa = (
+                score_atual
+            )
 
-            # Se ficar parado por muito tempo
-            if (
-                self.time_stopped
-                >= self.STOPPED_LIMIT
-            ):
-
-                self.die(track)
-                return
+            self.tempo_sem_progresso = 0.0
 
         else:
 
-            self.time_stopped = 0.0
+            self.tempo_sem_progresso += (
+                dt
+            )
+
+        if (
+            self.tempo_sem_progresso
+            >= self.NO_PROGRESS_LIMIT
+        ):
+
+            self.die(
+                track
+            )
+
+            return
 
     # ---------------------------------------------------------
     # DESENHAR
     # ---------------------------------------------------------
 
-    def draw(self, screen):
+    def draw(
+        self,
+        screen
+    ):
 
-        rect = self.image.get_rect(
-            center=(
-                round(self.x),
-                round(self.y)
+        rect = (
+            self.image.get_rect(
+                center=(
+                    round(
+                        self.x
+                    ),
+                    round(
+                        self.y
+                    )
+                )
             )
         )
 

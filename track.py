@@ -1,553 +1,1154 @@
-# Importar as bibliotecas
 import math
-import pygame
+from pathlib import Path
 
 import numpy as np
+import pygame
+
+from skimage.measure import label
 from skimage.morphology import skeletonize
 
 
-# Classe da pista
 class Track:
 
-    # Quantidade de checkpoints criados automaticamente
-    CHECKPOINT_COUNT = 40
+    ALPHA_THRESHOLD = 180
 
-    # Distancia que o carro precisa chegar do checkpoint
+    CHECKPOINT_COUNT = 40
     CHECKPOINT_RADIUS = 18
 
-    def __init__(self, image_path, screen_width, screen_height):
-        self.name = image_path.stem
+    SCREEN_WIDTH_PERCENT = 0.85
+    SCREEN_HEIGHT_PERCENT = 0.90
 
-        self.screen_width = screen_width
-        self.screen_height = screen_height
+    # ---------------------------------------------------------
+    # INICIALIZAR
+    # ---------------------------------------------------------
 
-        # Carregar imagem da pista com transparencia
-        self.original_surface = pygame.image.load(
-            str(image_path)
+    def __init__(
+        self,
+        image_path,
+        screen_width,
+        screen_height
+    ):
+
+        self.path = Path(
+            image_path
+        )
+
+        self.name = (
+            self.path.stem
+        )
+
+        self.screen_width = (
+            screen_width
+        )
+
+        self.screen_height = (
+            screen_height
+        )
+
+        # -----------------------------------------------------
+        # CARREGAR IMAGEM
+        # -----------------------------------------------------
+
+        source = pygame.image.load(
+            str(
+                self.path
+            )
         ).convert_alpha()
 
-        self.surface = None
-        self.mask = None
-        self.rect = None
+        # Remover bordas transparentes desnecessarias
+        bounds = source.get_bounding_rect(
+            min_alpha=1
+        )
 
-        # Ponto de largada
-        self.spawn_point = (0, 0)
-        self.spawn_angle = 0.0
+        if (
+            bounds.width > 0
+            and bounds.height > 0
+        ):
 
-        # Linha central
-        self.centerline = None
-        self.centerline_points = []
+            source = source.subsurface(
+                bounds
+            ).copy()
 
-        # Checkpoints
-        self.checkpoints = []
+        source_width = (
+            source.get_width()
+        )
 
-        # Imagens usadas somente para debug
-        self.centerline_debug = None
-        self.checkpoints_debug = None
+        source_height = (
+            source.get_height()
+        )
 
-        # Preparar pista
-        self.load_and_fit()
+        max_width = int(
+            screen_width
+            * self.SCREEN_WIDTH_PERCENT
+        )
 
-    # ---------------------------------------------------------
-    # CARREGAR E PREPARAR A PISTA
-    # ---------------------------------------------------------
+        max_height = int(
+            screen_height
+            * self.SCREEN_HEIGHT_PERCENT
+        )
 
-    def load_and_fit(self):
-
-        # Tamanho original da imagem
-        width, height = self.original_surface.get_size()
-
-        # Ajustar a pista na tela sem deformar
         scale = min(
-            (self.screen_width * 0.85) / width,
-            (self.screen_height * 0.90) / height,
+            max_width
+            / source_width,
+
+            max_height
+            / source_height
         )
 
-        new_size = (
-            max(1, round(width * scale)),
-            max(1, round(height * scale)),
-        )
-
-        # Redimensionar pista
-        self.surface = pygame.transform.smoothscale(
-            self.original_surface,
-            new_size
-        )
-
-        # Centralizar pista
-        self.rect = self.surface.get_rect(
-            center=(
-                self.screen_width // 2,
-                self.screen_height // 2
+        new_width = max(
+            1,
+            round(
+                source_width
+                * scale
             )
         )
 
-        # Criar mascara da pista
-        # 1 = pista
-        # 0 = fora da pista
-        self.mask = pygame.mask.from_surface(
-            self.surface,
-            180
+        new_height = max(
+            1,
+            round(
+                source_height
+                * scale
+            )
         )
 
-        # Encontrar local da largada
-        self.spawn_point, self.spawn_angle = (
-            self.find_spawn_point()
+        if (
+            new_width != source_width
+            or new_height != source_height
+        ):
+
+            source = pygame.transform.smoothscale(
+                source,
+                (
+                    new_width,
+                    new_height
+                )
+            )
+
+        self.surface = (
+            source
         )
 
-        # Criar linha central
-        self.generate_centerline()
+        self.rect = (
+            self.surface.get_rect(
+                center=(
+                    screen_width // 2,
+                    screen_height // 2
+                )
+            )
+        )
 
-        # Criar checkpoints
-        self.generate_checkpoints()
+        self.width = (
+            self.surface.get_width()
+        )
 
-        # Criar imagem de debug dos checkpoints
-        self.create_checkpoints_debug()
+        self.height = (
+            self.surface.get_height()
+        )
 
-    # ---------------------------------------------------------
-    # LINHA CENTRAL
-    # ---------------------------------------------------------
+        # -----------------------------------------------------
+        # MAPA DA PISTA
+        # -----------------------------------------------------
 
-    def generate_centerline(self):
-
-        # Pegar transparencia da imagem
         alpha = pygame.surfarray.array_alpha(
             self.surface
         )
 
-        # Pixels visiveis sao considerados pista
-        track_area = alpha > 180
-
-        # Pygame trabalha X,Y
-        # Numpy trabalha Y,X
-        track_area = track_area.T
-
-        # Criar esqueleto da pista
-        skeleton = skeletonize(
-            track_area
+        # pygame entrega [x, y].
+        # Internamente usamos [y, x].
+        driveable = (
+            alpha.T
+            >= self.ALPHA_THRESHOLD
         )
 
-        # Remover pequenas pontas indesejadas
-        skeleton = self.remove_small_branches(
-            skeleton
+        self.driveable_map = (
+            np.ascontiguousarray(
+                driveable,
+                dtype=np.uint8
+            )
         )
 
-        self.centerline = skeleton
-
-        # Ordenar os pontos da linha central
-        self.centerline_points = (
-            self.order_centerline()
+        # Bytes simples para as consultas feitas
+        # milhares de vezes por segundo.
+        self._driveable_bytes = (
+            self.driveable_map.tobytes()
         )
 
-        # Criar imagem de debug
-        self.centerline_debug = pygame.Surface(
-            self.surface.get_size(),
-            pygame.SRCALPHA
+        # Mantido por compatibilidade,
+        # mas a simulacao principal nao depende dele.
+        self.mask = pygame.mask.from_surface(
+            self.surface,
+            self.ALPHA_THRESHOLD
         )
 
-        ys, xs = np.where(
-            self.centerline
+        # -----------------------------------------------------
+        # SPAWN
+        # -----------------------------------------------------
+
+        rough_spawn, rough_angle = (
+            self.find_spawn(
+                self.driveable_map
+            )
         )
 
-        # Desenhar uma unica vez
-        for x, y in zip(xs, ys):
+        # -----------------------------------------------------
+        # CENTRO DA PISTA
+        # -----------------------------------------------------
 
-            self.centerline_debug.set_at(
-                (x, y),
-                pygame.Color("red")
+        skeleton = (
+            self.create_skeleton(
+                self.driveable_map
+            )
+        )
+
+        ordered_line = (
+            self.order_centerline(
+                skeleton,
+                rough_spawn,
+                rough_angle
+            )
+        )
+
+        # Se a linha foi encontrada,
+        # usar o proprio centro dela como largada.
+        if len(
+            ordered_line
+        ) >= 2:
+
+            spawn_local = (
+                ordered_line[0]
             )
 
+            direction_index = min(
+                12,
+                len(
+                    ordered_line
+                ) - 1
+            )
+
+            direction_point = (
+                ordered_line[
+                    direction_index
+                ]
+            )
+
+            dx = (
+                direction_point[0]
+                - spawn_local[0]
+            )
+
+            dy = (
+                direction_point[1]
+                - spawn_local[1]
+            )
+
+            if (
+                dx != 0
+                or dy != 0
+            ):
+
+                spawn_angle = (
+                    math.atan2(
+                        dy,
+                        dx
+                    )
+                )
+
+            else:
+
+                spawn_angle = (
+                    rough_angle
+                )
+
+        else:
+
+            spawn_local = (
+                rough_spawn
+            )
+
+            spawn_angle = (
+                rough_angle
+            )
+
+        self.spawn_point = (
+            self.rect.x
+            + spawn_local[0],
+
+            self.rect.y
+            + spawn_local[1]
+        )
+
+        self.spawn_angle = (
+            spawn_angle
+        )
+
+        # Linha em coordenadas da tela
+        self.centerline = [
+            (
+                self.rect.x + x,
+                self.rect.y + y
+            )
+            for x, y in ordered_line
+        ]
+
+        # -----------------------------------------------------
+        # CHECKPOINTS
+        # -----------------------------------------------------
+
+        self.checkpoints = (
+            self.create_checkpoints(
+                ordered_line
+            )
+        )
+
+        self.checkpoint_radius_squared = (
+            self.CHECKPOINT_RADIUS
+            * self.CHECKPOINT_RADIUS
+        )
+
+        # Debug somente se for solicitado
+        self._debug_surface = None
+
     # ---------------------------------------------------------
-    # REMOVER PEQUENAS RAMIFICACOES
+    # CONSULTA RAPIDA
     # ---------------------------------------------------------
 
-    def remove_small_branches(
+    def is_point_on_track_xy(
         self,
+        x,
+        y
+    ):
+
+        local_x = (
+            int(x)
+            - self.rect.x
+        )
+
+        local_y = (
+            int(y)
+            - self.rect.y
+        )
+
+        if (
+            local_x < 0
+            or local_y < 0
+            or local_x >= self.width
+            or local_y >= self.height
+        ):
+
+            return False
+
+        index = (
+            local_y
+            * self.width
+            + local_x
+        )
+
+        return (
+            self._driveable_bytes[
+                index
+            ]
+            != 0
+        )
+
+    def is_point_on_track(
+        self,
+        point
+    ):
+
+        return self.is_point_on_track_xy(
+            point[0],
+            point[1]
+        )
+
+    # ---------------------------------------------------------
+    # COMPATIBILIDADE COM MASK
+    # ---------------------------------------------------------
+
+    def is_car_on_track(
+        self,
+        car_mask,
+        car_rect
+    ):
+
+        offset = (
+            car_rect.x
+            - self.rect.x,
+
+            car_rect.y
+            - self.rect.y
+        )
+
+        overlap = (
+            self.mask.overlap_area(
+                car_mask,
+                offset
+            )
+        )
+
+        return (
+            overlap
+            == car_mask.count()
+        )
+
+    # ---------------------------------------------------------
+    # MAIOR TRECHO HORIZONTAL
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def widest_horizontal_run(
+        driveable
+    ):
+
+        height, width = (
+            driveable.shape
+        )
+
+        current = np.zeros(
+            height,
+            dtype=np.int32
+        )
+
+        best = np.zeros(
+            height,
+            dtype=np.int32
+        )
+
+        best_end = np.zeros(
+            height,
+            dtype=np.int32
+        )
+
+        for x in range(
+            width
+        ):
+
+            active = (
+                driveable[
+                    :,
+                    x
+                ]
+                != 0
+            )
+
+            current = np.where(
+                active,
+                current + 1,
+                0
+            )
+
+            improved = (
+                current > best
+            )
+
+            best[
+                improved
+            ] = current[
+                improved
+            ]
+
+            best_end[
+                improved
+            ] = x
+
+        row = int(
+            np.argmax(
+                best
+            )
+        )
+
+        length = int(
+            best[
+                row
+            ]
+        )
+
+        end = int(
+            best_end[
+                row
+            ]
+        )
+
+        start = (
+            end
+            - length
+            + 1
+        )
+
+        center_x = (
+            start + end
+        ) // 2
+
+        return (
+            length,
+            center_x,
+            row
+        )
+
+    # ---------------------------------------------------------
+    # MAIOR TRECHO VERTICAL
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def widest_vertical_run(
+        driveable
+    ):
+
+        height, width = (
+            driveable.shape
+        )
+
+        current = np.zeros(
+            width,
+            dtype=np.int32
+        )
+
+        best = np.zeros(
+            width,
+            dtype=np.int32
+        )
+
+        best_end = np.zeros(
+            width,
+            dtype=np.int32
+        )
+
+        for y in range(
+            height
+        ):
+
+            active = (
+                driveable[
+                    y,
+                    :
+                ]
+                != 0
+            )
+
+            current = np.where(
+                active,
+                current + 1,
+                0
+            )
+
+            improved = (
+                current > best
+            )
+
+            best[
+                improved
+            ] = current[
+                improved
+            ]
+
+            best_end[
+                improved
+            ] = y
+
+        column = int(
+            np.argmax(
+                best
+            )
+        )
+
+        length = int(
+            best[
+                column
+            ]
+        )
+
+        end = int(
+            best_end[
+                column
+            ]
+        )
+
+        start = (
+            end
+            - length
+            + 1
+        )
+
+        center_y = (
+            start + end
+        ) // 2
+
+        return (
+            length,
+            column,
+            center_y
+        )
+
+    # ---------------------------------------------------------
+    # LARGADA
+    # ---------------------------------------------------------
+
+    def find_spawn(
+        self,
+        driveable
+    ):
+
+        (
+            horizontal_length,
+            horizontal_x,
+            horizontal_y
+        ) = self.widest_horizontal_run(
+            driveable
+        )
+
+        (
+            vertical_length,
+            vertical_x,
+            vertical_y
+        ) = self.widest_vertical_run(
+            driveable
+        )
+
+        if (
+            horizontal_length
+            >= vertical_length
+        ):
+
+            return (
+                (
+                    horizontal_x,
+                    horizontal_y
+                ),
+                0.0
+            )
+
+        return (
+            (
+                vertical_x,
+                vertical_y
+            ),
+            math.pi / 2.0
+        )
+
+    # ---------------------------------------------------------
+    # MAIOR COMPONENTE
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def largest_component(
+        skeleton
+    ):
+
+        labels = label(
+            skeleton,
+            connectivity=2
+        )
+
+        if labels.max() <= 0:
+
+            return skeleton
+
+        counts = np.bincount(
+            labels.ravel()
+        )
+
+        # Fundo nao conta
+        counts[0] = 0
+
+        largest = int(
+            np.argmax(
+                counts
+            )
+        )
+
+        return (
+            labels == largest
+        )
+
+    # ---------------------------------------------------------
+    # REMOVER PONTAS CURTAS
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def prune_endpoints(
         skeleton,
         passes=8
     ):
 
-        result = skeleton.copy()
+        current = (
+            skeleton.copy()
+        )
 
-        height, width = result.shape
+        for _ in range(
+            passes
+        ):
 
-        # Fazer poucas passagens para eliminar
-        # pequenas pontas criadas pelo skeletonize
-        for _ in range(passes):
+            padded = np.pad(
+                current.astype(
+                    np.uint8
+                ),
+                1
+            )
 
-            remove = []
+            neighbors = (
+                padded[:-2, :-2]
+                + padded[:-2, 1:-1]
+                + padded[:-2, 2:]
 
-            ys, xs = np.where(result)
+                + padded[1:-1, :-2]
+                + padded[1:-1, 2:]
 
-            for y, x in zip(ys, xs):
+                + padded[2:, :-2]
+                + padded[2:, 1:-1]
+                + padded[2:, 2:]
+            )
 
-                x1 = max(0, x - 1)
-                x2 = min(width, x + 2)
-
-                y1 = max(0, y - 1)
-                y2 = min(height, y + 2)
-
-                area = result[
-                    y1:y2,
-                    x1:x2
-                ]
-
-                # Quantidade de vizinhos
-                neighbors = (
-                    np.count_nonzero(area) - 1
+            endpoints = (
+                current
+                & (
+                    neighbors <= 1
                 )
+            )
 
-                # Ponta da linha
-                if neighbors <= 1:
-                    remove.append(
-                        (x, y)
-                    )
-
-            # Nao existe mais nada para remover
-            if not remove:
+            if not np.any(
+                endpoints
+            ):
                 break
 
-            for x, y in remove:
-                result[y, x] = False
+            current[
+                endpoints
+            ] = False
+
+        return current
+
+    # ---------------------------------------------------------
+    # SKELETON
+    # ---------------------------------------------------------
+
+    def create_skeleton(
+        self,
+        driveable
+    ):
+
+        skeleton = skeletonize(
+            driveable.astype(
+                bool
+            )
+        )
+
+        skeleton = (
+            self.largest_component(
+                skeleton
+            )
+        )
+
+        skeleton = (
+            self.prune_endpoints(
+                skeleton,
+                passes=8
+            )
+        )
+
+        skeleton = (
+            self.largest_component(
+                skeleton
+            )
+        )
+
+        return skeleton
+
+    # ---------------------------------------------------------
+    # VIZINHOS
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def neighbors_of(
+        point,
+        pixels
+    ):
+
+        y, x = point
+
+        result = []
+
+        for dy in (
+            -1,
+            0,
+            1
+        ):
+
+            for dx in (
+                -1,
+                0,
+                1
+            ):
+
+                if (
+                    dx == 0
+                    and dy == 0
+                ):
+                    continue
+
+                candidate = (
+                    y + dy,
+                    x + dx
+                )
+
+                if candidate in pixels:
+                    result.append(
+                        candidate
+                    )
 
         return result
 
     # ---------------------------------------------------------
-    # PEGAR VIZINHOS DE UM PONTO DA LINHA
+    # TRAÇAR UMA DIRECAO
     # ---------------------------------------------------------
 
-    def get_centerline_neighbors(
+    def trace_path(
         self,
-        point,
-        points
+        start,
+        first,
+        pixels
     ):
 
-        x, y = point
-
-        neighbors = []
-
-        # Verificar os 8 pixels ao redor
-        for dy in (-1, 0, 1):
-
-            for dx in (-1, 0, 1):
-
-                if dx == 0 and dy == 0:
-                    continue
-
-                candidate = (
-                    x + dx,
-                    y + dy
-                )
-
-                if candidate in points:
-                    neighbors.append(
-                        candidate
-                    )
-
-        return neighbors
-
-    # ---------------------------------------------------------
-    # PEGAR MAIOR PARTE CONECTADA DA LINHA
-    # ---------------------------------------------------------
-
-    def largest_centerline_component(
-        self,
-        points
-    ):
-
-        remaining = set(points)
-
-        largest = set()
-
-        while remaining:
-
-            start = remaining.pop()
-
-            component = {
-                start
-            }
-
-            stack = [
-                start
-            ]
-
-            while stack:
-
-                current = stack.pop()
-
-                for neighbor in (
-                    self.get_centerline_neighbors(
-                        current,
-                        remaining
-                    )
-                ):
-
-                    if neighbor in remaining:
-
-                        remaining.remove(
-                            neighbor
-                        )
-
-                        component.add(
-                            neighbor
-                        )
-
-                        stack.append(
-                            neighbor
-                        )
-
-            if len(component) > len(largest):
-                largest = component
-
-        return largest
-
-    # ---------------------------------------------------------
-    # ORDENAR A LINHA CENTRAL
-    # ---------------------------------------------------------
-
-    def order_centerline(self):
-
-        ys, xs = np.where(
-            self.centerline
-        )
-
-        all_points = {
-            (int(x), int(y))
-            for x, y in zip(xs, ys)
-        }
-
-        if not all_points:
-            raise ValueError(
-                f"Nao foi possivel criar a centerline de {self.name}."
-            )
-
-        # Usar somente o maior caminho conectado
-        points = self.largest_centerline_component(
-            all_points
-        )
-
-        if not points:
-            raise ValueError(
-                f"Centerline vazia em {self.name}."
-            )
-
-        # Converter largada para coordenadas locais
-        spawn_local = (
-            self.spawn_point[0] - self.rect.left,
-            self.spawn_point[1] - self.rect.top,
-        )
-
-        # Encontrar ponto da centerline mais perto da largada
-        start = min(
-            points,
-            key=lambda point:
-                (
-                    point[0] - spawn_local[0]
-                ) ** 2
-                +
-                (
-                    point[1] - spawn_local[1]
-                ) ** 2
-        )
-
-        ordered = [
-            start
+        path = [
+            start,
+            first
         ]
 
         visited = {
-            start
+            start,
+            first
         }
 
-        previous = None
-        current = start
-
-        # Direcao inicial da pista
-        spawn_direction = (
-            math.cos(self.spawn_angle),
-            math.sin(self.spawn_angle)
+        previous = (
+            start
         )
 
-        # Caminhar pela linha central
-        for _ in range(
-            len(points) + 100
+        current = (
+            first
+        )
+
+        while len(
+            visited
+        ) < len(
+            pixels
         ):
 
-            neighbors = (
-                self.get_centerline_neighbors(
-                    current,
-                    points
-                )
-            )
-
-            # Vizinho ainda nao visitado
             candidates = [
                 point
-                for point in neighbors
+                for point in self.neighbors_of(
+                    current,
+                    pixels
+                )
                 if point not in visited
             ]
 
             if not candidates:
                 break
 
-            # Primeiro passo segue a direcao da largada
-            if previous is None:
+            current_direction_x = (
+                current[1]
+                - previous[1]
+            )
 
-                def first_score(point):
+            current_direction_y = (
+                current[0]
+                - previous[0]
+            )
 
-                    dx = (
-                        point[0] - current[0]
-                    )
+            best_candidate = None
+            best_score = -999.0
 
-                    dy = (
-                        point[1] - current[1]
-                    )
+            for candidate in candidates:
 
-                    return (
-                        dx * spawn_direction[0]
-                        +
-                        dy * spawn_direction[1]
-                    )
-
-                next_point = max(
-                    candidates,
-                    key=first_score
+                dx = (
+                    candidate[1]
+                    - current[1]
                 )
 
-            else:
-
-                # Depois tentar continuar na direcao
-                # mais suave possivel
-                old_dx = (
-                    current[0] - previous[0]
+                dy = (
+                    candidate[0]
+                    - current[0]
                 )
 
-                old_dy = (
-                    current[1] - previous[1]
+                length_a = math.sqrt(
+                    current_direction_x
+                    * current_direction_x
+                    + current_direction_y
+                    * current_direction_y
                 )
 
-                old_length = math.hypot(
-                    old_dx,
-                    old_dy
+                length_b = math.sqrt(
+                    dx * dx
+                    + dy * dy
                 )
 
-                if old_length == 0:
-                    old_length = 1
+                if (
+                    length_a <= 0.0
+                    or length_b <= 0.0
+                ):
 
-                old_dx /= old_length
-                old_dy /= old_length
+                    score = -1.0
 
-                def direction_score(point):
+                else:
 
-                    new_dx = (
-                        point[0] - current[0]
+                    score = (
+                        current_direction_x * dx
+                        + current_direction_y * dy
+                    ) / (
+                        length_a
+                        * length_b
                     )
 
-                    new_dy = (
-                        point[1] - current[1]
+                if score > best_score:
+
+                    best_score = score
+                    best_candidate = (
+                        candidate
                     )
 
-                    new_length = math.hypot(
-                        new_dx,
-                        new_dy
-                    )
-
-                    if new_length == 0:
-                        return -999
-
-                    new_dx /= new_length
-                    new_dy /= new_length
-
-                    # Quanto maior, menor a mudanca
-                    # brusca de direcao
-                    return (
-                        old_dx * new_dx
-                        +
-                        old_dy * new_dy
-                    )
-
-                next_point = max(
-                    candidates,
-                    key=direction_score
-                )
+            if best_candidate is None:
+                break
 
             previous = current
-            current = next_point
-
-            ordered.append(
-                current
-            )
+            current = best_candidate
 
             visited.add(
                 current
             )
 
-        if len(ordered) < 100:
-
-            raise ValueError(
-                "A linha central encontrada em "
-                f"{self.name} ficou muito pequena."
+            path.append(
+                current
             )
 
-        return ordered
+        return path
 
     # ---------------------------------------------------------
-    # CRIAR CHECKPOINTS
+    # ORDENAR LINHA CENTRAL
     # ---------------------------------------------------------
 
-    def generate_checkpoints(self):
+    def order_centerline(
+        self,
+        skeleton,
+        spawn,
+        spawn_angle
+    ):
 
-        self.checkpoints = []
-
-        total_points = len(
-            self.centerline_points
+        coordinates = np.argwhere(
+            skeleton
         )
 
-        if total_points == 0:
-            return
+        if len(
+            coordinates
+        ) == 0:
 
-        # Dividir a linha em partes iguais
-        step = (
-            total_points
-            / self.CHECKPOINT_COUNT
+            return [
+                spawn
+            ]
+
+        spawn_x = (
+            spawn[0]
         )
 
-        # Comecar um pouco depois da largada
-        # O ultimo checkpoint volta para perto da largada
-        for number in range(
+        spawn_y = (
+            spawn[1]
+        )
+
+        distances = (
+            (
+                coordinates[:, 1]
+                - spawn_x
+            ) ** 2
+
+            + (
+                coordinates[:, 0]
+                - spawn_y
+            ) ** 2
+        )
+
+        nearest_index = int(
+            np.argmin(
+                distances
+            )
+        )
+
+        start_y = int(
+            coordinates[
+                nearest_index,
+                0
+            ]
+        )
+
+        start_x = int(
+            coordinates[
+                nearest_index,
+                1
+            ]
+        )
+
+        start = (
+            start_y,
+            start_x
+        )
+
+        pixels = set(
+            map(
+                tuple,
+                coordinates.tolist()
+            )
+        )
+
+        first_options = (
+            self.neighbors_of(
+                start,
+                pixels
+            )
+        )
+
+        if not first_options:
+
+            return [
+                (
+                    start_x,
+                    start_y
+                )
+            ]
+
+        desired_x = math.cos(
+            spawn_angle
+        )
+
+        desired_y = math.sin(
+            spawn_angle
+        )
+
+        paths = []
+
+        for first in first_options:
+
+            path = self.trace_path(
+                start,
+                first,
+                pixels
+            )
+
+            dx = (
+                first[1]
+                - start[1]
+            )
+
+            dy = (
+                first[0]
+                - start[0]
+            )
+
+            length = math.sqrt(
+                dx * dx
+                + dy * dy
+            )
+
+            if length > 0:
+
+                alignment = (
+                    desired_x * dx
+                    + desired_y * dy
+                ) / length
+
+            else:
+
+                alignment = -1.0
+
+            paths.append(
+                (
+                    path,
+                    alignment
+                )
+            )
+
+        # Preferir caminhos longos.
+        longest = max(
+            len(
+                item[0]
+            )
+            for item in paths
+        )
+
+        minimum_good_length = (
+            longest * 0.95
+        )
+
+        good_paths = [
+            item
+            for item in paths
+            if len(
+                item[0]
+            )
+            >= minimum_good_length
+        ]
+
+        # Entre caminhos praticamente iguais,
+        # escolher a direcao alinhada com a largada.
+        best_path, _ = max(
+            good_paths,
+            key=lambda item: item[1]
+        )
+
+        # Converter y,x para x,y
+        return [
+            (
+                point[1],
+                point[0]
+            )
+            for point in best_path
+        ]
+
+    # ---------------------------------------------------------
+    # CHECKPOINTS
+    # ---------------------------------------------------------
+
+    def create_checkpoints(
+        self,
+        ordered_line
+    ):
+
+        if not ordered_line:
+
+            return []
+
+        amount = len(
+            ordered_line
+        )
+
+        checkpoints = []
+
+        # O primeiro checkpoint fica a frente
+        # da largada e o ultimo volta para ela.
+        for index in range(
             1,
             self.CHECKPOINT_COUNT + 1
         ):
 
-            index = round(
-                number * step
-            ) % total_points
-
-            local_x, local_y = (
-                self.centerline_points[
+            line_index = int(
+                (
                     index
+                    * amount
+                )
+                / self.CHECKPOINT_COUNT
+            ) % amount
+
+            x, y = (
+                ordered_line[
+                    line_index
                 ]
             )
 
-            # Converter para coordenadas da tela
-            world_x = (
-                self.rect.left
-                + local_x
-            )
-
-            world_y = (
-                self.rect.top
-                + local_y
-            )
-
-            self.checkpoints.append(
+            checkpoints.append(
                 (
-                    float(world_x),
-                    float(world_y)
+                    self.rect.x + x,
+                    self.rect.y + y
                 )
             )
 
+        return checkpoints
+
     # ---------------------------------------------------------
-    # VERIFICAR CHECKPOINT
+    # CHECAR CHECKPOINT
     # ---------------------------------------------------------
 
     def checkpoint_reached(
@@ -559,46 +1160,50 @@ class Track:
         if not self.checkpoints:
             return False
 
-        checkpoint_index %= len(
-            self.checkpoints
-        )
-
-        checkpoint_x, checkpoint_y = (
+        checkpoint = (
             self.checkpoints[
                 checkpoint_index
+                % len(
+                    self.checkpoints
+                )
             ]
         )
 
         dx = (
             position[0]
-            - checkpoint_x
+            - checkpoint[0]
         )
 
         dy = (
             position[1]
-            - checkpoint_y
+            - checkpoint[1]
         )
 
-        distance_squared = (
-            dx * dx
-            +
-            dy * dy
-        )
-
+        # Sem sqrt
         return (
-            distance_squared
-            <=
-            self.CHECKPOINT_RADIUS
-            ** 2
+            dx * dx
+            + dy * dy
+            <= self.checkpoint_radius_squared
         )
 
     # ---------------------------------------------------------
-    # DEBUG DOS CHECKPOINTS
+    # DEBUG OPCIONAL
     # ---------------------------------------------------------
 
-    def create_checkpoints_debug(self):
+    def create_debug_surface(
+        self
+    ):
 
-        self.checkpoints_debug = pygame.Surface(
+        if (
+            self._debug_surface
+            is not None
+        ):
+
+            return (
+                self._debug_surface
+            )
+
+        surface = pygame.Surface(
             (
                 self.screen_width,
                 self.screen_height
@@ -606,319 +1211,64 @@ class Track:
             pygame.SRCALPHA
         )
 
-        for index, point in enumerate(
+        # Linha central
+        if len(
+            self.centerline
+        ) >= 2:
+
+            pygame.draw.lines(
+                surface,
+                (
+                    0,
+                    220,
+                    255,
+                    140
+                ),
+                False,
+                self.centerline,
+                1
+            )
+
+        # Checkpoints
+        for index, checkpoint in enumerate(
             self.checkpoints
         ):
 
-            x = round(point[0])
-            y = round(point[1])
-
-            # Primeiro checkpoint amarelo
-            if index == 0:
-                color = pygame.Color(
-                    "yellow"
-                )
-
-            else:
-                color = pygame.Color(
-                    "cyan"
-                )
-
             pygame.draw.circle(
-                self.checkpoints_debug,
-                color,
-                (x, y),
-                5
+                surface,
+                (
+                    255,
+                    200,
+                    40,
+                    170
+                ),
+                (
+                    int(
+                        checkpoint[0]
+                    ),
+                    int(
+                        checkpoint[1]
+                    )
+                ),
+                5,
+                1
             )
 
-    # Mostrar linha central
-    def draw_centerline_debug(
+        self._debug_surface = (
+            surface
+        )
+
+        return surface
+
+    def draw_debug(
         self,
         screen
     ):
 
         screen.blit(
-            self.centerline_debug,
-            self.rect
-        )
-
-    # Mostrar checkpoints
-    def draw_checkpoints_debug(
-        self,
-        screen
-    ):
-
-        screen.blit(
-            self.checkpoints_debug,
-            (0, 0)
-        )
-
-    # ---------------------------------------------------------
-    # SABER SE UM PONTO ESTA NA PISTA
-    # ---------------------------------------------------------
-
-    def is_point_on_track(
-        self,
-        point
-    ):
-
-        x = int(
-            point[0]
-            - self.rect.left
-        )
-
-        y = int(
-            point[1]
-            - self.rect.top
-        )
-
-        width, height = (
-            self.mask.get_size()
-        )
-
-        if not (
-            0 <= x < width
-            and
-            0 <= y < height
-        ):
-            return False
-
-        return bool(
-            self.mask.get_at(
-                (x, y)
-            )
-        )
-
-    # ---------------------------------------------------------
-    # VERIFICAR SE O CARRO ESTA COMPLETAMENTE NA PISTA
-    # ---------------------------------------------------------
-
-    def is_car_on_track(
-        self,
-        car_mask,
-        car_rect
-    ):
-
-        offset = (
-            car_rect.left
-            - self.rect.left,
-
-            car_rect.top
-            - self.rect.top
-        )
-
-        pixels_inside = (
-            self.mask.overlap_area(
-                car_mask,
-                offset
-            )
-        )
-
-        return (
-            pixels_inside
-            ==
-            car_mask.count()
-        )
-
-    # ---------------------------------------------------------
-    # VERIFICAR SE A LARGADA E SEGURA
-    # ---------------------------------------------------------
-
-    def _safe_local_spawn(
-        self,
-        x,
-        y,
-        horizontal
-    ):
-
-        width, height = (
-            self.mask.get_size()
-        )
-
-        if horizontal:
-
-            points = [
-                (0, 0),
-                (-14, -7),
-                (-14, 7),
-                (14, -7),
-                (14, 7),
-                (30, 0),
-                (-30, 0),
-            ]
-
-        else:
-
-            points = [
-                (0, 0),
-                (-7, -14),
-                (7, -14),
-                (-7, 14),
-                (7, 14),
-                (0, 30),
-                (0, -30),
-            ]
-
-        for dx, dy in points:
-
-            px = x + dx
-            py = y + dy
-
-            if not (
-                0 <= px < width
-                and
-                0 <= py < height
-            ):
-                return False
-
-            if not self.mask.get_at(
-                (px, py)
-            ):
-                return False
-
-        return True
-
-    # ---------------------------------------------------------
-    # ENCONTRAR LARGADA
-    # ---------------------------------------------------------
-
-    def find_spawn_point(self):
-
-        width, height = (
-            self.mask.get_size()
-        )
-
-        best = None
-
-        # Procurar trechos horizontais e verticais
-        for horizontal in (
-            True,
-            False
-        ):
-
-            if horizontal:
-                line_count = height
-                line_length = width
-
-            else:
-                line_count = width
-                line_length = height
-
-            # Andar de 4 em 4 para reduzir processamento
-            for line in range(
-                0,
-                line_count,
-                4
-            ):
-
-                start = None
-
-                for pos in range(
-                    line_length + 1
-                ):
-
-                    on_track = False
-
-                    if pos < line_length:
-
-                        if horizontal:
-
-                            x = pos
-                            y = line
-
-                        else:
-
-                            x = line
-                            y = pos
-
-                        on_track = bool(
-                            self.mask.get_at(
-                                (x, y)
-                            )
-                        )
-
-                    # Entrou na pista
-                    if (
-                        on_track
-                        and
-                        start is None
-                    ):
-
-                        start = pos
-
-                    # Saiu da pista
-                    elif (
-                        not on_track
-                        and
-                        start is not None
-                    ):
-
-                        length = (
-                            pos - start
-                        )
-
-                        mid = (
-                            start
-                            + pos
-                            - 1
-                        ) // 2
-
-                        if horizontal:
-
-                            x = mid
-                            y = line
-
-                        else:
-
-                            x = line
-                            y = mid
-
-                        better = (
-                            best is None
-                            or
-                            length > best[0]
-                        )
-
-                        if (
-                            better
-                            and
-                            self._safe_local_spawn(
-                                x,
-                                y,
-                                horizontal
-                            )
-                        ):
-
-                            if horizontal:
-                                angle = 0.0
-
-                            else:
-                                angle = (
-                                    math.pi / 2
-                                )
-
-                            best = (
-                                length,
-                                x,
-                                y,
-                                angle
-                            )
-
-                        start = None
-
-        if best is None:
-
-            raise ValueError(
-                "Nao foi possivel encontrar "
-                f"uma largada segura em {self.name}."
-            )
-
-        _, x, y, angle = best
-
-        return (
+            self.create_debug_surface(),
             (
-                self.rect.left + x,
-                self.rect.top + y
-            ),
-            angle
+                0,
+                0
+            )
         )
