@@ -2063,6 +2063,19 @@ class AIVisualizer:
                         ),
                         ("Elites", f"{elites}/{limit}", Theme.TEXT),
                         (
+                            "Persistencia",
+                            (
+                                "CARREGADA"
+                                if getattr(
+                                    evolution,
+                                    "carregado_do_disco",
+                                    False
+                                )
+                                else "ATIVA"
+                            ),
+                            Theme.GREEN,
+                        ),
+                        (
                             "Avaliacoes",
                             str(evolution.total_avaliacoes),
                             Theme.TEXT,

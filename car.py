@@ -171,8 +171,28 @@ class Car:
             evolution
         )
 
-        # Cada carro possui seu proprio cerebro
-        self.brain = Brain()
+        # Usa o aprendizado salvo quando ele ja existe
+        if (
+            self.evolution is not None
+            and hasattr(
+                self.evolution,
+                "criar_cerebro_inicial"
+            )
+        ):
+
+            self.brain = (
+                self.evolution.criar_cerebro_inicial(
+                    getattr(
+                        track,
+                        "name",
+                        None
+                    )
+                )
+            )
+
+        else:
+
+            self.brain = Brain()
 
         # Fitness
         self.fitness = 0.0

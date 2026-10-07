@@ -3,6 +3,15 @@ import numpy as np
 
 class Brain:
 
+    ARQUITETURA = (
+        10,
+        24,
+        48,
+        24,
+        12,
+        3,
+    )
+
     def __init__(self):
 
         # 7 sensores
@@ -11,14 +20,9 @@ class Brain:
         # tracao
         #
         # Total: 10 entradas
-        self.camadas = [
-            10,
-            24,
-            48,
-            24,
-            12,
-            3,
-        ]
+        self.camadas = list(
+            self.ARQUITETURA
+        )
 
         self.pesos = []
         self.biases = []
@@ -72,9 +76,13 @@ class Brain:
         self.biases[-1][1] = -1.00
         self.biases[-1][2] = 0.00
 
-        # -----------------------------------------------------
-        # TELEMETRIA
-        # -----------------------------------------------------
+        self.limpar_telemetria()
+
+    # ---------------------------------------------------------
+    # TELEMETRIA
+    # ---------------------------------------------------------
+
+    def limpar_telemetria(self):
 
         self.ultima_entrada = np.zeros(
             self.camadas[0],
@@ -84,7 +92,7 @@ class Brain:
         self.ultimas_ativacoes = []
 
         self.ultima_saida_bruta = np.zeros(
-            3,
+            self.camadas[-1],
             dtype=np.float32
         )
 
@@ -118,7 +126,7 @@ class Brain:
             dtype=np.float32
         )
 
-        # Uma copia só para desacoplar da lista que chegou.
+        # Uma copia so para desacoplar da lista que chegou
         resultado = (
             resultado.copy()
         )
@@ -131,11 +139,7 @@ class Brain:
             resultado
         ]
 
-        # Toda a rede e calculada pelo NumPy.
-        #
-        # Cada np.tanh ja devolve um array novo e nada o altera
-        # depois, entao guardar a telemetria nao precisa copiar
-        # de novo.
+        # Toda a rede e calculada pelo NumPy
         for pesos, biases in zip(
             self.pesos,
             self.biases
@@ -206,25 +210,92 @@ class Brain:
             for biases in self.biases
         ]
 
-        novo.ultima_entrada = np.zeros(
-            novo.camadas[0],
-            dtype=np.float32
+        novo.limpar_telemetria()
+
+        return novo
+
+    # ---------------------------------------------------------
+    # CARREGAR PARAMETROS
+    # ---------------------------------------------------------
+
+    @classmethod
+    def criar_com_parametros(
+        cls,
+        pesos,
+        biases
+    ):
+
+        arquitetura = list(
+            cls.ARQUITETURA
         )
 
-        novo.ultimas_ativacoes = []
+        if (
+            len(pesos)
+            != len(arquitetura) - 1
+            or len(biases)
+            != len(arquitetura) - 1
+        ):
 
-        novo.ultima_saida_bruta = np.zeros(
-            3,
-            dtype=np.float32
+            raise ValueError(
+                "Quantidade de camadas incompativel com o cerebro atual."
+            )
+
+        novos_pesos = []
+        novos_biases = []
+
+        for indice, (entradas, saidas) in enumerate(
+            zip(
+                arquitetura[:-1],
+                arquitetura[1:]
+            )
+        ):
+
+            peso = np.asarray(
+                pesos[indice],
+                dtype=np.float32
+            )
+
+            bias = np.asarray(
+                biases[indice],
+                dtype=np.float32
+            )
+
+            if peso.shape != (
+                saidas,
+                entradas
+            ):
+
+                raise ValueError(
+                    f"Peso da camada {indice} tem formato invalido: "
+                    f"{peso.shape}."
+                )
+
+            if bias.shape != (
+                saidas,
+            ):
+
+                raise ValueError(
+                    f"Bias da camada {indice} tem formato invalido: "
+                    f"{bias.shape}."
+                )
+
+            novos_pesos.append(
+                peso.copy()
+            )
+
+            novos_biases.append(
+                bias.copy()
+            )
+
+        novo = cls.__new__(
+            cls
         )
 
-        novo.ultima_decisao = {
-            "acelerar": 0.0,
-            "frear": 0.0,
-            "virar": 0.0,
-        }
+        novo.camadas = arquitetura
+        novo.pesos = novos_pesos
+        novo.biases = novos_biases
 
-        novo.contador_decisoes = 0
+        novo.limpar_telemetria()
 
         return novo
 

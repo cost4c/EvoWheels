@@ -1,13 +1,25 @@
+import atexit
+import json
+import os
 import random
+import time
+from pathlib import Path
+
+import numpy as np
 
 from brain import Brain
 
 
 class Evolution:
 
+    STATE_VERSION = 1
+    SAVE_INTERVAL = 3.0
+
     def __init__(
         self,
-        elite_size=10
+        elite_size=10,
+        storage_path=None,
+        auto_load=True
     ):
 
         self.elite_size = (
@@ -22,10 +34,410 @@ class Evolution:
 
         # Estatisticas
         self.total_avaliacoes = 0
-
         self.melhor_score = 0.0
-
         self.avaliacoes_sem_recorde = 0
+
+        # Persistencia
+        if storage_path is None:
+
+            storage_path = (
+                Path(__file__).resolve().parent
+                / "models"
+                / "evolution_state.npz"
+            )
+
+        self.storage_path = Path(
+            storage_path
+        )
+
+        self.carregado_do_disco = False
+        self._dirty = False
+        self._last_save = 0.0
+
+        if auto_load:
+            self.carregar()
+
+        # Salva tambem quando o programa fecha normalmente
+        atexit.register(
+            self.salvar
+        )
+
+    # ---------------------------------------------------------
+    # PERSISTENCIA
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _brain_to_arrays(
+        arrays,
+        prefix,
+        brain
+    ):
+
+        for indice, peso in enumerate(
+            brain.pesos
+        ):
+
+            arrays[
+                f"{prefix}_w_{indice}"
+            ] = np.asarray(
+                peso,
+                dtype=np.float32
+            )
+
+        for indice, bias in enumerate(
+            brain.biases
+        ):
+
+            arrays[
+                f"{prefix}_b_{indice}"
+            ] = np.asarray(
+                bias,
+                dtype=np.float32
+            )
+
+    @staticmethod
+    def _brain_from_arrays(
+        data,
+        prefix
+    ):
+
+        pesos = []
+        biases = []
+
+        for indice in range(
+            len(Brain.ARQUITETURA) - 1
+        ):
+
+            pesos.append(
+                data[
+                    f"{prefix}_w_{indice}"
+                ]
+            )
+
+            biases.append(
+                data[
+                    f"{prefix}_b_{indice}"
+                ]
+            )
+
+        return Brain.criar_com_parametros(
+            pesos,
+            biases
+        )
+
+    def salvar(
+        self,
+        force=True
+    ):
+
+        if not force and not self._dirty:
+            return False
+
+        if not self._dirty and self.storage_path.exists():
+            return False
+
+        try:
+            self.storage_path.parent.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+            metadata = {
+                "version": self.STATE_VERSION,
+                "architecture": list(
+                    Brain.ARQUITETURA
+                ),
+                "elite_size": self.elite_size,
+                "total_avaliacoes": self.total_avaliacoes,
+                "melhor_score": self.melhor_score,
+                "avaliacoes_sem_recorde": self.avaliacoes_sem_recorde,
+                "global": [],
+                "tracks": [],
+            }
+
+            arrays = {}
+
+            for indice, record in enumerate(
+                self.elites
+            ):
+
+                metadata[
+                    "global"
+                ].append(
+                    {
+                        "score": float(
+                            record["score"]
+                        ),
+                        "pista": record.get(
+                            "pista"
+                        ),
+                    }
+                )
+
+                self._brain_to_arrays(
+                    arrays,
+                    f"g_{indice}",
+                    record["brain"]
+                )
+
+            for pista_indice, (pista, records) in enumerate(
+                self.elites_por_pista.items()
+            ):
+
+                track_meta = {
+                    "pista": pista,
+                    "records": [],
+                }
+
+                for record_indice, record in enumerate(
+                    records
+                ):
+
+                    track_meta[
+                        "records"
+                    ].append(
+                        {
+                            "score": float(
+                                record["score"]
+                            )
+                        }
+                    )
+
+                    self._brain_to_arrays(
+                        arrays,
+                        f"t_{pista_indice}_{record_indice}",
+                        record["brain"]
+                    )
+
+                metadata[
+                    "tracks"
+                ].append(
+                    track_meta
+                )
+
+            arrays[
+                "metadata"
+            ] = np.array(
+                json.dumps(
+                    metadata,
+                    ensure_ascii=False
+                )
+            )
+
+            temp_path = self.storage_path.with_suffix(
+                self.storage_path.suffix + ".tmp"
+            )
+
+            with open(
+                temp_path,
+                "wb"
+            ) as file:
+
+                np.savez_compressed(
+                    file,
+                    **arrays
+                )
+
+            os.replace(
+                temp_path,
+                self.storage_path
+            )
+
+            self._dirty = False
+            self._last_save = time.monotonic()
+
+            return True
+
+        except Exception as error:
+
+            print(
+                "[EvoWheels] Nao foi possivel salvar o aprendizado: "
+                f"{error}"
+            )
+
+            return False
+
+    def _salvar_se_preciso(self):
+
+        if not self._dirty:
+            return
+
+        agora = time.monotonic()
+
+        if (
+            agora - self._last_save
+            >= self.SAVE_INTERVAL
+        ):
+
+            self.salvar(
+                force=False
+            )
+
+    def carregar(self):
+
+        if not self.storage_path.exists():
+            return False
+
+        try:
+            with np.load(
+                self.storage_path,
+                allow_pickle=False
+            ) as data:
+
+                metadata = json.loads(
+                    str(
+                        data["metadata"].item()
+                    )
+                )
+
+                if metadata.get(
+                    "version"
+                ) != self.STATE_VERSION:
+
+                    raise ValueError(
+                        "versao do arquivo de treino incompativel"
+                    )
+
+                arquitetura = tuple(
+                    metadata.get(
+                        "architecture",
+                        ()
+                    )
+                )
+
+                if arquitetura != tuple(
+                    Brain.ARQUITETURA
+                ):
+
+                    raise ValueError(
+                        "arquitetura salva diferente da arquitetura atual"
+                    )
+
+                elites = []
+
+                for indice, record_meta in enumerate(
+                    metadata.get(
+                        "global",
+                        []
+                    )[:self.elite_size]
+                ):
+
+                    brain = self._brain_from_arrays(
+                        data,
+                        f"g_{indice}"
+                    )
+
+                    elites.append(
+                        {
+                            "score": float(
+                                record_meta["score"]
+                            ),
+                            "brain": brain,
+                            "pista": record_meta.get(
+                                "pista"
+                            ),
+                        }
+                    )
+
+                elites_por_pista = {}
+
+                for pista_indice, track_meta in enumerate(
+                    metadata.get(
+                        "tracks",
+                        []
+                    )
+                ):
+
+                    pista = track_meta.get(
+                        "pista"
+                    )
+
+                    if pista is None:
+                        continue
+
+                    records = []
+
+                    for record_indice, record_meta in enumerate(
+                        track_meta.get(
+                            "records",
+                            []
+                        )[:self.elite_size]
+                    ):
+
+                        brain = self._brain_from_arrays(
+                            data,
+                            f"t_{pista_indice}_{record_indice}"
+                        )
+
+                        records.append(
+                            {
+                                "score": float(
+                                    record_meta["score"]
+                                ),
+                                "brain": brain,
+                                "pista": pista,
+                            }
+                        )
+
+                    if records:
+                        elites_por_pista[
+                            pista
+                        ] = records
+
+                self.elites = elites
+                self.elites_por_pista = elites_por_pista
+
+                self.total_avaliacoes = int(
+                    metadata.get(
+                        "total_avaliacoes",
+                        0
+                    )
+                )
+
+                self.melhor_score = float(
+                    metadata.get(
+                        "melhor_score",
+                        0.0
+                    )
+                )
+
+                self.avaliacoes_sem_recorde = int(
+                    metadata.get(
+                        "avaliacoes_sem_recorde",
+                        0
+                    )
+                )
+
+                if self.elites:
+                    self.melhor_score = max(
+                        self.melhor_score,
+                        float(
+                            self.elites[0][
+                                "score"
+                            ]
+                        )
+                    )
+
+            self.carregado_do_disco = True
+            self._dirty = False
+            self._last_save = time.monotonic()
+
+            print(
+                "[EvoWheels] Aprendizado carregado: "
+                f"{len(self.elites)} elites globais, "
+                f"recorde {self.melhor_score:.1f}."
+            )
+
+            return True
+
+        except Exception as error:
+
+            print(
+                "[EvoWheels] O aprendizado salvo foi ignorado: "
+                f"{error}"
+            )
+
+            return False
 
     # ---------------------------------------------------------
     # VERIFICAR SE MERECE ENTRAR
@@ -113,6 +525,7 @@ class Evolution:
         )
 
         self.total_avaliacoes += 1
+        self._dirty = True
 
         # Recorde global
         if (
@@ -131,6 +544,7 @@ class Evolution:
             self.avaliacoes_sem_recorde += 1
 
         if score <= 0.0:
+            self._salvar_se_preciso()
             return
 
         # Elite da pista
@@ -160,20 +574,17 @@ class Evolution:
             )
         )
 
-        # -----------------------------------------------------
-        # OTIMIZACAO IMPORTANTE
-        # -----------------------------------------------------
-
         # Se nao vai entrar em nenhuma elite,
-        # nem copiar o cerebro.
+        # nem copiar o cerebro
         if (
             not global_qualifies
             and not track_qualifies
         ):
 
+            self._salvar_se_preciso()
             return
 
-        # Apenas UMA copia.
+        # Apenas uma copia
         snapshot = (
             brain.copiar()
         )
@@ -204,6 +615,8 @@ class Evolution:
                 track_record
             )
 
+        self._salvar_se_preciso()
+
     # ---------------------------------------------------------
     # SELECAO PONDERADA
     # ---------------------------------------------------------
@@ -220,10 +633,7 @@ class Evolution:
         if count == 0:
             return None
 
-        # Melhor = peso maior.
-        #
-        # Exemplo 4:
-        # 16, 9, 4, 1
+        # Melhor = peso maior
         weights = [
             (
                 count - index
@@ -278,8 +688,7 @@ class Evolution:
         if not self.elites:
             return None
 
-        # 80% das vezes aprende com alguem
-        # que foi bom nesta mesma pista.
+        # Prioriza quem foi bom na mesma pista
         if (
             pista is not None
             and pista
@@ -302,10 +711,50 @@ class Evolution:
             if chosen is not None:
                 return chosen
 
-        # O restante usa conhecimento global
         return self.weighted_choice(
             self.elites
         )
+
+    # ---------------------------------------------------------
+    # CEREBRO INICIAL
+    # ---------------------------------------------------------
+
+    def criar_cerebro_inicial(
+        self,
+        pista=None
+    ):
+
+        # Primeira execucao: ainda nao existe experiencia salva
+        if not self.elites:
+            return Brain()
+
+        pai = self.escolher_elite(
+            pista
+        )
+
+        if pai is None:
+            return Brain()
+
+        chance = random.random()
+
+        # Parte da populacao preserva exatamente o que ja funcionou
+        if chance < 0.20:
+            return pai.copiar()
+
+        # A maioria nasce perto dos melhores, mas com diversidade
+        if chance < 0.92:
+
+            filho = pai.copiar()
+
+            filho.mutar(
+                taxa=0.03,
+                intensidade=0.06
+            )
+
+            return filho
+
+        # Mantem algumas geneticas novas na populacao
+        return Brain()
 
     # ---------------------------------------------------------
     # EXPLORACAO ADAPTATIVA
@@ -349,18 +798,14 @@ class Evolution:
         pista=None
     ):
 
-        # O score ja inclui progresso, checkpoints e velocidade util.
-        # Aqui a selecao espalha os melhores comportamentos.
+        # O score ja inclui progresso, checkpoints e velocidade util
         self.registrar(
             brain_atual,
             score_atual,
             pista
         )
 
-        # -----------------------------------------------------
-        # AINDA NAO EXISTE ELITE
-        # -----------------------------------------------------
-
+        # Ainda nao existe elite
         if not self.elites:
 
             filho = (
@@ -382,11 +827,7 @@ class Evolution:
             self.fator_exploracao()
         )
 
-        # -----------------------------------------------------
-        # 18%
-        # COPIA DIRETA DE UM BOM CEREBRO
-        # -----------------------------------------------------
-
+        # 18%: copia direta de um bom cerebro
         if chance < 0.18:
 
             pai = (
@@ -399,11 +840,7 @@ class Evolution:
                 pai.copiar()
             )
 
-        # -----------------------------------------------------
-        # 70%
-        # PEQUENA EVOLUCAO DE UM BOM CEREBRO
-        # -----------------------------------------------------
-
+        # 70%: pequena evolucao de um bom cerebro
         if chance < 0.88:
 
             pai = (
@@ -431,11 +868,7 @@ class Evolution:
 
             return filho
 
-        # -----------------------------------------------------
-        # 9%
-        # EXPLORACAO MAIS FORTE
-        # -----------------------------------------------------
-
+        # 9%: exploracao mais forte
         if chance < 0.97:
 
             pai = (
@@ -463,11 +896,7 @@ class Evolution:
 
             return filho
 
-        # -----------------------------------------------------
-        # 3%
-        # GENETICA TOTALMENTE NOVA
-        # -----------------------------------------------------
-
+        # 3%: genetica totalmente nova
         return Brain()
 
     # ---------------------------------------------------------
