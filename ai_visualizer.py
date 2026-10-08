@@ -48,7 +48,7 @@ L = {
     "mode_manual": "MANUAL",
 
     "perception": "PERCEPCAO",
-    "perception_hint": "7 sensores frontais  -  alcance 100 px",
+    "perception_hint": "7 sensores frontais  -  alcance 180 px",
     "highest_risk": "MAIOR RISCO",
 
     "telemetry": "TELEMETRIA",
@@ -116,7 +116,7 @@ INPUT_LABELS = (
 OUTPUT_LABELS = ("ACELERAR", "FREAR", "VIRAR")
 
 # Alcance real dos sensores do carro, usado apenas para desenhar.
-SENSOR_RANGE = 100.0
+SENSOR_RANGE = 180.0
 SENSOR_START = 10.0
 
 
@@ -1403,7 +1403,7 @@ class AIVisualizer:
         self.text.blit(
             surface,
             "tiny",
-            "100 px",
+            "180 px",
             Theme.TEXT_FAINT,
             (origin_x, origin_y - radius - self.text.height("tiny") - 2),
             align="center",

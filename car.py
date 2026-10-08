@@ -4,9 +4,13 @@ from pathlib import Path
 import pygame
 
 from brain import Brain
+from curve_safety import CurveSafety
 
 
 class Car:
+    # O turbo prepara o sprite somente quando vai desenhar.
+    RENDER_SPRITES = True
+
 
     # ---------------------------------------------------------
     # SENSORES SOMENTE NA FRENTE
@@ -36,7 +40,7 @@ class Car:
     )
 
     # Alcance pedido
-    SENSOR_RANGE = 100
+    SENSOR_RANGE = 180
 
     # Comecar um pouco fora do centro
     SENSOR_START = 10
@@ -56,40 +60,42 @@ class Car:
     # VELOCIDADE
     # ---------------------------------------------------------
 
-    # Nao existe velocidade minima fixa.
     MAX_SPEED = 175.0
 
     # Velocidade de largada, nao e um limite minimo
-    START_SPEED = 90.0
+    START_SPEED = 55.0
 
     # Motor forte e freio rapido para atacar reta e curva
-    ACCELERATION = 340.0
-    BRAKING = 390.0
+    ACCELERATION = 230.0
+    BRAKING = 270.0
 
-    FRICTION = 1.5
+    FRICTION = 3.0
 
     TURN_SPEED = 2.75
 
     # ---------------------------------------------------------
-    # SISTEMA ANTI ARRASTO
+    # LIMITE FISICO DE MOVIMENTO
     # ---------------------------------------------------------
 
-    # Abaixo disso o motor ajuda o carro
-    # a recuperar movimento.
-    ANTI_CRAWL_SPEED = 22.0
+    # Regra fisica: o carro nunca pode parar.
+    # A IA continua escolhendo a velocidade acima deste piso.
+    MIN_ROLLING_SPEED = 25.0
 
-    # Forca extra progressiva.
-    ANTI_CRAWL_ACCELERATION = 130.0
+    # Ritmo adaptativo. Nao existe velocidade-alvo fixa.
+    # O sistema calcula uma velocidade segura a partir do espaco real
+    # visto pelos sensores e so ajuda quando o cerebro esta muito abaixo
+    # do ritmo que aquele trecho permite.
+    PACE_SAFETY_BUFFER = 20.0
+    PACE_BRAKE_MARGIN = 0.36
+    PACE_RESPONSE_TIME = 0.60
+    PACE_MAX_ASSIST = 0.90
+    PACE_ASSIST_START_DISTANCE = 55.0
+    PACE_FULL_ASSIST_DISTANCE = 130.0
 
-    # Se insistir em se arrastar, a tentativa termina
-    CRAWL_SPEED = 10.0
-
-    CRAWL_TIME_LIMIT = 0.90
-
-    # Se praticamente parar
-    STOPPED_SPEED = 2.5
-
-    STOPPED_TIME_LIMIT = 0.35
+    # A evolucao ganha pontos extras quando o proprio cerebro consegue
+    # manter o ritmo sem depender da ajuda adaptativa.
+    AUTONOMY_PROGRESS_REWARD = 20.0
+    CHECKPOINT_AUTONOMY_REWARD = 12.0
 
     # ---------------------------------------------------------
     # IA
@@ -99,20 +105,6 @@ class Car:
     THINK_INTERVAL = 0.10
 
     COMMAND_GAIN = 1.5
-
-    # Instinto de corrida. Nao fixa velocidade.
-    # Mantem tracao forte enquanto os sensores mostram pista livre.
-    CLEAR_THROTTLE = 0.78
-    CAUTION_THROTTLE = 0.52
-    APPROACH_THROTTLE = 0.28
-
-    CLEAR_RISK = 0.35
-    CAUTION_RISK = 0.55
-    DANGER_RISK = 0.72
-
-    # Em pista livre, reduz esterco aleatorio para evitar circulos.
-    # Quando aparece parede, devolve autoridade ao cerebro.
-    CLEAR_STEERING_AUTHORITY = 0.18
 
     # ---------------------------------------------------------
     # ANTI LOOP
@@ -132,6 +124,13 @@ class Car:
     # Bonus por avancar rapido sem premiar velocidade inutil
     SPEED_PROGRESS_REWARD = 35.0
     CHECKPOINT_SPEED_REWARD = 15.0
+
+    # Depois que aprende o caminho, passar pelos mesmos pontos em menos
+    # tempo vale mais. Isso faz a evolucao buscar voltas mais rapidas.
+    CHECKPOINT_TIME_REWARD = 24.0
+    CHECKPOINT_TIME_BONUS_MAX = 45.0
+    LAP_TIME_REWARD = 1500.0
+    LAP_TIME_BONUS_MAX = 500.0
 
     # ---------------------------------------------------------
     # TAMANHO DO CARRO
@@ -209,13 +208,29 @@ class Car:
 
         # Velocidade so vale quando existe progresso real
         self.speed_fitness = 0.0
+        self.autonomy_fitness = 0.0
+
+        # Ritmo adaptativo. A ajuda mantem a corrida viva agora, mas a
+        # evolucao recebe vantagem quando aprende a nao precisar dela.
+        self.dynamic_safe_speed = self.START_SPEED
+        self.safety_active = False
+        self.safety_interventions = 0
+        self.safety_assist_ema = 0.0
+        self.last_pace_assist = 0.0
+        self.last_pace_assist_ratio = 0.0
+        self.pace_assist_ema = 0.0
+        self.pace_assist_sum = 0.0
+        self.pace_assist_samples = 0
+        self.last_neural_traction = 0.0
+
+        # Metricas usadas para premiar eficiencia e guardar memoria.
+        self.checkpoints_total = 0
+        self.tempo_segmento = 0.0
+        self.tempo_volta = 0.0
+        self.melhor_tempo_volta = None
 
         self.tempo_sem_progresso = 0.0
         self.melhor_score_tentativa = 0.0
-
-        # Anti arrasto
-        self.tempo_arrastando = 0.0
-        self.tempo_parado = 0.0
 
         # 7 sensores
         self.last_sensor_risks = [
@@ -401,6 +416,23 @@ class Car:
 
         self.fitness = 0.0
         self.speed_fitness = 0.0
+        self.autonomy_fitness = 0.0
+
+        self.dynamic_safe_speed = self.START_SPEED
+        self.safety_active = False
+        self.safety_interventions = 0
+        self.safety_assist_ema = 0.0
+        self.last_pace_assist = 0.0
+        self.last_pace_assist_ratio = 0.0
+        self.pace_assist_ema = 0.0
+        self.pace_assist_sum = 0.0
+        self.pace_assist_samples = 0
+        self.last_neural_traction = 0.0
+
+        self.checkpoints_total = 0
+        self.tempo_segmento = 0.0
+        self.tempo_volta = 0.0
+        self.melhor_tempo_volta = None
 
         self.x = float(
             track.spawn_point[0]
@@ -409,6 +441,8 @@ class Car:
         self.y = float(
             track.spawn_point[1]
         )
+
+        self.previous_position = (self.x, self.y)
 
         self.angle = float(
             track.spawn_angle
@@ -437,6 +471,9 @@ class Car:
 
         self.time_alive = 0.0
 
+        # Uma nova vida nunca herda previsões feitas na vida anterior.
+        self._curve_safety_cache = None
+
         self.distance_traveled = 0.0
 
         self.checkpoint_atual = 0
@@ -446,10 +483,6 @@ class Car:
         self.tempo_sem_progresso = 0.0
 
         self.melhor_score_tentativa = 0.0
-
-        self.tempo_arrastando = 0.0
-
-        self.tempo_parado = 0.0
 
         self.last_sensor_risks = [
             0.0
@@ -744,6 +777,25 @@ class Car:
                     delta_progresso
                     * self.SPEED_PROGRESS_REWARD
                     * (velocidade ** 1.5)
+                    * (1.0 - 0.65 * self.safety_assist_ema)
+                )
+
+                # Se dois carros avancam parecido, o que aprendeu a manter
+                # velocidade sozinho recebe vantagem evolutiva. A ajuda de
+                # ritmo nao vira um atalho permanente para a rede.
+                autonomia = max(
+                    0.0,
+                    min(
+                        1.0,
+                        1.0 - self.pace_assist_ema
+                    )
+                )
+
+                self.autonomy_fitness += (
+                    delta_progresso
+                    * self.AUTONOMY_PROGRESS_REWARD
+                    * autonomia
+                    * velocidade
                 )
 
         score = (
@@ -795,6 +847,7 @@ class Car:
                 self.fitness
             )
             + self.speed_fitness
+            + self.autonomy_fitness
             + parcial
         )
 
@@ -810,14 +863,16 @@ class Car:
         if not track.checkpoints:
             return
 
-        if not track.checkpoint_reached(
-            (
-                self.x,
-                self.y
-            ),
-            self.checkpoint_atual
-        ):
-
+        reached = track.checkpoint_reached(
+            (self.x, self.y), self.checkpoint_atual
+        )
+        if not reached and hasattr(track, "checkpoint_crossed"):
+            reached = track.checkpoint_crossed(
+                self.previous_position,
+                (self.x, self.y),
+                self.checkpoint_atual
+            )
+        if not reached:
             return
 
         self.fitness += (
@@ -836,8 +891,37 @@ class Car:
         self.speed_fitness += (
             self.CHECKPOINT_SPEED_REWARD
             * (velocidade ** 1.5)
+            * (1.0 - 0.65 * self.safety_assist_ema)
         )
 
+        autonomia = max(
+            0.0,
+            min(
+                1.0,
+                1.0 - self.pace_assist_ema
+            )
+        )
+
+        self.autonomy_fitness += (
+            self.CHECKPOINT_AUTONOMY_REWARD
+            * autonomia
+        )
+
+        # O mesmo checkpoint vale mais quando e alcancado em menos tempo.
+        # O bonus e limitado para nunca superar a importancia do progresso.
+        tempo_segmento = max(
+            0.25,
+            self.tempo_segmento
+        )
+
+        self.speed_fitness += min(
+            self.CHECKPOINT_TIME_BONUS_MAX,
+            self.CHECKPOINT_TIME_REWARD / tempo_segmento
+            * (1.0 - 0.65 * self.safety_assist_ema)
+        )
+
+        self.tempo_segmento = 0.0
+        self.checkpoints_total += 1
         self.checkpoint_atual += 1
 
         if (
@@ -849,10 +933,28 @@ class Car:
 
             self.voltas += 1
 
+            tempo_volta = max(
+                1.0,
+                self.tempo_volta
+            )
+
+            if (
+                self.melhor_tempo_volta is None
+                or tempo_volta < self.melhor_tempo_volta
+            ):
+                self.melhor_tempo_volta = tempo_volta
+
             self.fitness += (
                 self.LAP_REWARD
             )
 
+            # Uma volta completa mais rapida recebe mais fitness.
+            self.speed_fitness += min(
+                self.LAP_TIME_BONUS_MAX,
+                self.LAP_TIME_REWARD / tempo_volta
+            )
+
+            self.tempo_volta = 0.0
             self.checkpoint_atual = 0
 
         self.best_fitness = max(
@@ -863,6 +965,26 @@ class Car:
         self.reset_segment_progress(
             track
         )
+
+        # Salva marcos importantes no momento em que acontecem.
+        # Assim um carro nao precisa morrer para a evolucao lembrar dele.
+        if (
+            self.evolution is not None
+            and hasattr(
+                self.evolution,
+                "registrar_memoria"
+            )
+        ):
+            self.evolution.registrar_memoria(
+                self.brain,
+                self.get_evolution_score(),
+                getattr(
+                    track,
+                    "name",
+                    None
+                ),
+                self.get_learning_metrics()
+            )
 
     # ---------------------------------------------------------
     # COLISAO
@@ -985,6 +1107,34 @@ class Car:
         return True
 
     # ---------------------------------------------------------
+    # METRICAS DE APRENDIZADO
+    # ---------------------------------------------------------
+
+    def get_learning_metrics(
+        self
+    ):
+        if self.pace_assist_samples > 0:
+            assistencia_media = (
+                self.pace_assist_sum
+                / self.pace_assist_samples
+            )
+        else:
+            assistencia_media = 0.0
+
+        return {
+            "checkpoints": self.checkpoints_total,
+            "voltas": self.voltas,
+            "melhor_tempo_volta": self.melhor_tempo_volta,
+            "assistencia_media": assistencia_media,
+            "correcoes_curva": self.safety_interventions,
+            "ajuda_curva": self.safety_assist_ema,
+            "autonomia_ritmo": max(
+                0.0,
+                min(1.0, 1.0 - assistencia_media)
+            ),
+        }
+
+    # ---------------------------------------------------------
     # MORTE
     # ---------------------------------------------------------
 
@@ -1014,13 +1164,173 @@ class Car:
                     track,
                     "name",
                     None
-                )
+                ),
+                metricas=self.get_learning_metrics()
             )
         )
 
         self.reset(
             track
         )
+
+    # ---------------------------------------------------------
+    # RITMO ADAPTATIVO
+    # ---------------------------------------------------------
+
+    def sensor_risk_to_distance(
+        self,
+        risk
+    ):
+        risk = max(
+            0.0,
+            min(1.0, float(risk))
+        )
+
+        return (
+            self.SENSOR_START
+            + (1.0 - risk)
+            * (
+                self.SENSOR_RANGE
+                - self.SENSOR_START
+            )
+        )
+
+    def calculate_dynamic_pace(
+        self
+    ):
+        # Em vez de uma regra binaria de "livre/perigo", usamos a
+        # distancia real percebida. O sensor central pesa mais e o lado
+        # mais aberto ajuda o carro a entender que existe continuacao
+        # em uma curva.
+        distances = [
+            self.sensor_risk_to_distance(risk)
+            for risk in self.last_sensor_risks
+        ]
+
+        front = distances[3]
+        near_open = max(
+            distances[2],
+            distances[4]
+        )
+        wide_open = max(
+            distances[1],
+            distances[5]
+        )
+
+        corridor = (
+            front * 0.68
+            + near_open * 0.24
+            + wide_open * 0.08
+        )
+
+        usable = max(
+            0.0,
+            corridor - self.PACE_SAFETY_BUFFER
+        )
+
+        # Velocidade que ainda deixa espaco fisico para reduzir usando
+        # a capacidade real de frenagem do carro.
+        safe_speed = math.sqrt(
+            2.0
+            * self.BRAKING
+            * usable
+            * self.PACE_BRAKE_MARGIN
+        )
+
+        safe_speed = max(
+            self.MIN_ROLLING_SPEED,
+            min(self.MAX_SPEED, safe_speed)
+        )
+
+        span = max(
+            1.0,
+            self.PACE_FULL_ASSIST_DISTANCE
+            - self.PACE_ASSIST_START_DISTANCE
+        )
+
+        confidence = (
+            corridor
+            - self.PACE_ASSIST_START_DISTANCE
+        ) / span
+
+        confidence = max(
+            0.0,
+            min(1.0, confidence)
+        )
+
+        return safe_speed, confidence
+
+    def calculate_pace_assist(
+        self,
+        neural_traction
+    ):
+        safe_speed, confidence = (
+            self.calculate_dynamic_pace()
+        )
+
+        self.dynamic_safe_speed = safe_speed
+        self.last_neural_traction = neural_traction
+
+        speed_gap = max(
+            0.0,
+            safe_speed - self.speed
+        )
+
+        if speed_gap <= 0.0 or confidence <= 0.0:
+            self.last_pace_assist = 0.0
+            self.last_pace_assist_ratio = 0.0
+            return 0.0
+
+        desired_acceleration = (
+            speed_gap
+            / self.PACE_RESPONSE_TIME
+        )
+
+        assist_floor = (
+            desired_acceleration
+            + self.FRICTION
+        ) / self.ACCELERATION
+
+        assist_floor = max(
+            0.0,
+            min(
+                self.PACE_MAX_ASSIST,
+                assist_floor
+            )
+        )
+
+        # A confianca cresce de forma continua conforme aumenta o espaco
+        # disponivel. Nao existe mais o antigo corte seco de risco 0.30.
+        assist_floor *= confidence
+
+        assist_used = max(
+            0.0,
+            assist_floor - neural_traction
+        )
+
+        if assist_floor > 0.02:
+            assist_ratio = max(
+                0.0,
+                min(
+                    1.0,
+                    assist_used / assist_floor
+                )
+            )
+
+            self.pace_assist_ema = (
+                self.pace_assist_ema * 0.92
+                + assist_ratio * 0.08
+            )
+
+            self.pace_assist_sum += assist_ratio
+            self.pace_assist_samples += 1
+        else:
+            assist_ratio = 0.0
+
+        self.last_pace_assist = assist_used
+        self.last_pace_assist_ratio = assist_ratio
+
+        return assist_floor
 
     # ---------------------------------------------------------
     # DECISAO DA IA
@@ -1065,46 +1375,31 @@ class Car:
             )
         )
 
-        # Aceleracao base de corrida.
-        # O cerebro continua livre para frear quando o risco aumenta.
-        riscos = self.last_sensor_risks
-
-        risco_frente = max(
-            riscos[2],
-            riscos[3],
-            riscos[4],
-        )
-
-        if risco_frente < self.CLEAR_RISK:
-            tracao_base = self.CLEAR_THROTTLE
-        elif risco_frente < self.CAUTION_RISK:
-            tracao_base = self.CAUTION_THROTTLE
-        elif risco_frente < self.DANGER_RISK:
-            tracao_base = self.APPROACH_THROTTLE
-        else:
-            tracao_base = 0.0
-
+        # A rede continua decidindo aceleracao e freio.
         tracao_neural = (
             acelerar
             - frear
         )
 
-        # Em pista livre, todos correm.
-        # Perto da parede, a rede neural assume o controle total.
-        if risco_frente < self.DANGER_RISK:
-            tracao_desejada = max(
-                tracao_neural,
-                tracao_base
-            )
-        else:
-            tracao_desejada = tracao_neural
+        # O ritmo adaptativo nao manda fazer uma velocidade fixa. Ele usa
+        # os 180 px de visao e a capacidade de frenagem para calcular
+        # quanto aquele trecho realmente permite. Se o cerebro ja acelera
+        # o suficiente, nenhuma ajuda e aplicada.
+        pace_floor = self.calculate_pace_assist(
+            tracao_neural
+        )
+
+        tracao_desejada = max(
+            tracao_neural,
+            pace_floor
+        )
 
         tracao = (
             self.last_traction
-            * 0.22
+            * 0.30
 
             + tracao_desejada
-            * 0.78
+            * 0.70
         )
 
         if abs(
@@ -1148,40 +1443,53 @@ class Car:
             )
         )
 
-        # Sem parede por perto, o carro tende a atacar em linha reta.
-        # O sensor nao escolhe o lado da curva; apenas libera mais esterco.
-        risco_lateral = max(
-            riscos[0],
-            riscos[1],
-            riscos[5],
-            riscos[6],
-        )
-
-        risco_direcao = max(
-            risco_frente,
-            risco_lateral
-        )
-
-        autoridade = (
-            self.CLEAR_STEERING_AUTHORITY
-            + (1.0 - self.CLEAR_STEERING_AUTHORITY)
-            * min(1.0, risco_direcao / self.DANGER_RISK)
-        )
-
-        direcao_desejada *= autoridade
-
         if abs(
             direcao_desejada
-        ) < 0.025:
+        ) < 0.02:
 
             direcao_desejada = 0.0
 
-        self.steering = (
-            self.steering
-            * 0.18
+        # Olha a curvatura dos proximos trechos: frear antes e melhor
+        # do que perceber a parede quando ja nao e possivel virar.
+        limite_curva = CurveSafety.curve_speed_limit(self, track)
+        tracao_limitada = CurveSafety.cap_traction(self, tracao, limite_curva)
+        reduziu_na_curva = tracao_limitada < tracao - 0.01
+        tracao = tracao_limitada
 
-            + direcao_desejada
-            * 0.82
+        # A direcao permanece neural se a trajetoria prevista for livre.
+        # So procura alternativas se a colisao estiver prevista.
+        direcao_desejada, tracao_segura, precisa_ajuda, _ = CurveSafety.choose(
+            self, track, direcao_desejada, tracao
+        )
+
+        self.safety_active = precisa_ajuda or reduziu_na_curva
+        self.safety_assist_ema = (
+            self.safety_assist_ema * 0.96
+            + (1.0 if self.safety_active else 0.0) * 0.04
+        )
+        if self.safety_active:
+            self.safety_interventions += 1
+            # Desliga a assistencia de ritmo na curva critica.
+            # Sem filtro de tracao: o freio precisa agir imediatamente.
+            self.last_traction = tracao_segura
+            self.last_pace_assist = 0.0
+            self.last_pace_assist_ratio = 0.0
+            self.accelerator = max(0.0, tracao_segura)
+            self.brake = max(0.0, -tracao_segura)
+            self.dynamic_safe_speed = min(
+                self.dynamic_safe_speed, self.speed
+            )
+
+        elif reduziu_na_curva:
+            self.last_traction = tracao
+            self.accelerator = max(0.0, tracao)
+            self.brake = max(0.0, -tracao)
+            self.last_pace_assist = 0.0
+            self.last_pace_assist_ratio = 0.0
+
+        self.steering = (
+            self.steering * 0.25
+            + direcao_desejada * 0.75
         )
 
     # ---------------------------------------------------------
@@ -1206,6 +1514,8 @@ class Car:
             return
 
         self.time_alive += dt
+        self.tempo_segmento += dt
+        self.tempo_volta += dt
 
         # -----------------------------------------------------
         # CEREBRO
@@ -1250,38 +1560,6 @@ class Car:
         )
 
         # -----------------------------------------------------
-        # ANTI ARRASTO
-        # -----------------------------------------------------
-
-        # Isso NAO fixa a velocidade.
-        #
-        # Apenas da uma ajuda progressiva
-        # caso o carro esteja ficando lento demais.
-        if (
-            self.speed
-            < self.ANTI_CRAWL_SPEED
-        ):
-
-            falta_velocidade = (
-                self.ANTI_CRAWL_SPEED
-                - self.speed
-            )
-
-            proporcao = (
-                falta_velocidade
-                / self.ANTI_CRAWL_SPEED
-            )
-
-            ajuda = (
-                proporcao
-                * self.ANTI_CRAWL_ACCELERATION
-            )
-
-            acceleration += (
-                ajuda
-            )
-
-        # -----------------------------------------------------
         # APLICAR VELOCIDADE
         # -----------------------------------------------------
 
@@ -1290,10 +1568,16 @@ class Car:
             * dt
         )
 
-        # Nunca pode andar para tras
-        if self.speed < 0.0:
+        # Regra absoluta: NAO PODE PARAR.
+        # Abaixo de 25 px/s, a velocidade fica em 25 px/s.
+        if (
+            self.speed
+            < self.MIN_ROLLING_SPEED
+        ):
 
-            self.speed = 0.0
+            self.speed = (
+                self.MIN_ROLLING_SPEED
+            )
 
         if (
             self.speed
@@ -1303,63 +1587,6 @@ class Car:
             self.speed = (
                 self.MAX_SPEED
             )
-
-        # -----------------------------------------------------
-        # DETECTAR ARRASTO
-        # -----------------------------------------------------
-
-        if (
-            self.speed
-            < self.CRAWL_SPEED
-        ):
-
-            self.tempo_arrastando += (
-                dt
-            )
-
-        else:
-
-            self.tempo_arrastando = 0.0
-
-        # Insistiu em andar muito devagar
-        if (
-            self.tempo_arrastando
-            >= self.CRAWL_TIME_LIMIT
-        ):
-
-            self.die(
-                track
-            )
-
-            return
-
-        # -----------------------------------------------------
-        # DETECTAR PARADO
-        # -----------------------------------------------------
-
-        if (
-            self.speed
-            < self.STOPPED_SPEED
-        ):
-
-            self.tempo_parado += (
-                dt
-            )
-
-        else:
-
-            self.tempo_parado = 0.0
-
-        if (
-            self.tempo_parado
-            >= self.STOPPED_TIME_LIMIT
-        ):
-
-            self.die(
-                track
-            )
-
-            return
 
         # -----------------------------------------------------
         # DIRECAO
@@ -1388,11 +1615,14 @@ class Car:
             * dt
         )
 
-        self.update_image()
+        if self.RENDER_SPRITES:
+            self.update_image()
 
         # -----------------------------------------------------
         # MOVIMENTO
         # -----------------------------------------------------
+
+        self.previous_position = (self.x, self.y)
 
         distance = (
             self.speed
@@ -1506,6 +1736,9 @@ class Car:
         self,
         screen
     ):
+
+        if not self.RENDER_SPRITES:
+            self.update_image()
 
         rect = (
             self.image.get_rect(

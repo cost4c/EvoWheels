@@ -67,15 +67,6 @@ class Brain:
                 biases
             )
 
-        # Instinto de corrida: nasce acelerando e com a direcao centrada
-        self.pesos[-1][0] *= 0.15
-        self.pesos[-1][1] *= 0.15
-        self.pesos[-1][2] *= 0.08
-
-        self.biases[-1][0] = 1.15
-        self.biases[-1][1] = -1.00
-        self.biases[-1][2] = 0.00
-
         self.limpar_telemetria()
 
     # ---------------------------------------------------------

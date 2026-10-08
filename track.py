@@ -173,6 +173,17 @@ class Track:
             self.driveable_map.tobytes()
         )
 
+        # Distancia ate a borda em cada pixel. Preparada UMA vez por pista.
+        # Durante a corrida, evita testar sete pontos do carro para cada
+        # posicao simulada nas previsoes de curva.
+        from scipy.ndimage import distance_transform_edt
+        borda = np.pad(self.driveable_map, 1, mode="constant")
+        distancia = distance_transform_edt(borda)[1:-1, 1:-1]
+        self._safety_distance_bytes = np.minimum(
+            distancia, 255
+        ).astype(np.uint8).tobytes()
+
+
         # Mantido por compatibilidade,
         # mas a simulacao principal nao depende dele.
         self.mask = pygame.mask.from_surface(
@@ -299,6 +310,11 @@ class Track:
                 ordered_line
             )
         )
+
+        # Portais completos de checkpoint, cruzando toda a largura da pista.
+        # Um raio pequeno no centro faz os carros perderem checkpoints
+        # quando passam pela faixa externa das curvas.
+        self.checkpoint_gates = self.create_checkpoint_gates(ordered_line)
 
         self.checkpoint_radius_squared = (
             self.CHECKPOINT_RADIUS
@@ -1146,6 +1162,66 @@ class Track:
             )
 
         return checkpoints
+
+    # ---------------------------------------------------------
+    # PORTAIS DE CHECKPOINT
+    # ---------------------------------------------------------
+
+    def create_checkpoint_gates(self, ordered_line):
+        if not ordered_line:
+            return []
+        gates = []
+        total = len(ordered_line)
+        for k in range(1, self.CHECKPOINT_COUNT + 1):
+            idx = int(k * total / self.CHECKPOINT_COUNT) % total
+            px, py = ordered_line[idx]
+            before = ordered_line[(idx - 14) % total]
+            after = ordered_line[(idx + 14) % total]
+            dx = after[0] - before[0]
+            dy = after[1] - before[1]
+            length = math.hypot(dx, dy)
+            if length < 1.0:
+                dx, dy = 1.0, 0.0
+            else:
+                dx, dy = dx / length, dy / length
+            nx, ny = -dy, dx
+            x, y = self.rect.x + px, self.rect.y + py
+            sides = []
+            # Mede ate a parede em ambos os lados do checkpoint.
+            for sign in (-1, 1):
+                width = 0.0
+                for step in range(2, 125, 2):
+                    if not self.is_point_on_track_xy(
+                        x + nx * step * sign,
+                        y + ny * step * sign
+                    ):
+                        width = float(step)
+                        break
+                else:
+                    width = 124.0
+                sides.append(max(10.0, width + 4.0))
+            gates.append((x, y, dx, dy, nx, ny, sides[0], sides[1]))
+        return gates
+
+    def checkpoint_crossed(self, previous, current, checkpoint_index):
+        gates = getattr(self, 'checkpoint_gates', ())
+        if not gates:
+            return False
+        x, y, dx, dy, nx, ny, negative_width, positive_width = (
+            gates[checkpoint_index % len(gates)]
+        )
+        ax, ay = previous
+        bx, by = current
+        before = (ax - x) * dx + (ay - y) * dy
+        after = (bx - x) * dx + (by - y) * dy
+        if not (before <= 0.0 <= after and after > before):
+            return False
+        # Interpolacao na reta do portal para medir a largura correta.
+        portion = -before / (after - before)
+        crossing_x = ax + (bx - ax) * portion
+        crossing_y = ay + (by - ay) * portion
+        side_distance = (crossing_x - x) * nx + (crossing_y - y) * ny
+        return -negative_width <= side_distance <= positive_width
 
     # ---------------------------------------------------------
     # CHECAR CHECKPOINT
